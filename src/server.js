@@ -129,7 +129,12 @@ const REMOTE_SCRIPT = [
 'MU=$((MT - MA))',
 'printf \'mem_total=%s\\nmem_used=%s\\nmem_avail=%s\\n\' "$MT" "$MU" "$MA"',
 '',
-'df -PB1 -x tmpfs -x devtmpfs -x squashfs 2>/dev/null | awk \'NR>1 {gsub("%","",$5); printf "disk=%s,%s,%s\\n", $6, $3, $5}\' | head -10',
+'# Disks: show every real filesystem (mount starts with /dev or is on a',
+'# real block device), excluding virtual filesystems and snap loops.',
+'# The head -10 + sort -k2 is to keep the dashboard from being dominated',
+'# by tiny mounts; on a Raspberry Pi the root partition is the biggest',
+'# so it shows up first.',
+'df -PB1 -x tmpfs -x devtmpfs -x squashfs 2>/dev/null | awk \'$1 ~ /^\\/dev\\// {gsub("%","",$5); printf "disk=%s,%s,%s\\n", $6, $3, $5}\' | sort -t, -k2 -nr | head -5',
 '',
 'NET=$(awk \'NR>2 && $1!~/:lo/ && $1!~/^Inter-/ {rx+=$2; tx+=$10} END {printf "%s %s", rx, tx}\' /proc/net/dev)',
 'printf \'net_rx=%s\\nnet_tx=%s\\n\' $(echo $NET | cut -d\' \' -f1) $(echo $NET | cut -d\' \' -f2)',
@@ -142,9 +147,14 @@ const REMOTE_SCRIPT = [
 'fi',
 ].join('\n')
 
-// Parse the k=v lines the script emits. Anything malformed or missing is
-// tolerated — partial data is more useful than a hard failure, and a 30s
-// retry will catch up.
+// Parse the k=v lines the script emits. Single-value keys (cpu, mem_used,
+// etc.) overwrite as before; multi-value keys (disk, network) accumulate
+// into arrays so we don't drop partitions just because the kernel printed
+// them in an order that overwrote the first one. The DISK_PREFIX list
+// tells the parser which keys to treat as multi-value — extend it here if
+// you add a new repeating metric to REMOTE_SCRIPT.
+const MULTI_VALUE_PREFIXES = ['disk']
+
 function parseScriptOutput(stdout) {
   const out = {}
   for (const line of stdout.split('\n')) {
@@ -152,7 +162,13 @@ function parseScriptOutput(stdout) {
     if (i < 0) continue
     const k = line.slice(0, i).trim()
     const v = line.slice(i + 1).trim()
-    if (k && v !== '') out[k] = v
+    if (!k || v === '') continue
+    if (MULTI_VALUE_PREFIXES.includes(k)) {
+      if (!Array.isArray(out[k])) out[k] = []
+      out[k].push(v)
+    } else {
+      out[k] = v
+    }
   }
   return out
 }
@@ -277,7 +293,10 @@ async function pollAll() {
       const load1 = +(r.load1 || 0)
       const net_rx = +(r.net_rx || 0)
       const net_tx = +(r.net_tx || 0)
-      const disks = (r.disk || '').split('\n').filter(Boolean).map(line => {
+      // r.disk is an array of "mount,totalBytes,usedPct" strings (see
+      // parseScriptOutput). Empty when df returned no real mounts.
+      const diskLines = Array.isArray(r.disk) ? r.disk : (r.disk ? [r.disk] : [])
+      const disks = diskLines.map(line => {
         const [mount, total, usedPct] = line.split(',')
         return { mount, totalGB: +(+(total || 0) / 1024 / 1024 / 1024).toFixed(1), usedPct: +(usedPct || 0) }
       })
