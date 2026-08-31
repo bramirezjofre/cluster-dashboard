@@ -13,10 +13,12 @@ services:
     container_name: cluster-dashboard
     restart: unless-stopped
     ports:
-      # 9090 on the host's localhost only — no exposure to NPM by default.
-      # If you want the dashboard reachable from another machine, change
-      # the bind to "0.0.0.0:9090:9090" or proxy it via NPM.
-      - "127.0.0.1:9090:9090"
+      # Bound to 0.0.0.0 so the dashboard is reachable from the LAN
+      # (phone, laptop, etc.) at http://<host-ip>:9090. The daemon serves
+      # the same data with no auth, so only do this on a network you
+      # trust. If you want to expose it beyond the LAN, put it behind
+      # Nginx Proxy Manager with auth — see README.
+      - "9090:9090"
     environment:
       PORT: "9090"
       POLL_INTERVAL_MS: "30000"
