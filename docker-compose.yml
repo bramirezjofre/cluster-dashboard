@@ -36,7 +36,7 @@ services:
       ALERT_ENABLED: "true"
       ALERT_TELEGRAM_BOT_TOKEN: ${ALERT_TELEGRAM_BOT_TOKEN}
       ALERT_TELEGRAM_CHAT_ID: ${ALERT_TELEGRAM_CHAT_ID}
-      ALERT_DISK_THRESHOLD: "85"
+      ALERT_DISK_THRESHOLD: "65"
       ALERT_COOLDOWN_MIN: "60"
     volumes:
       - /home/bramirezj/.ssh:/home/bramirezj/.ssh:ro

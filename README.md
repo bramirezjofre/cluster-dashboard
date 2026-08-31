@@ -54,14 +54,14 @@ cluster-dashboard/
 | `ALERT_ENABLED` | true | Set to `false` to disable Telegram alerts entirely |
 | `ALERT_TELEGRAM_BOT_TOKEN` | *(none)* | From `@BotFather`. Required for alerts |
 | `ALERT_TELEGRAM_CHAT_ID` | *(none)* | Numeric id of the group/channel the bot posts in |
-| `ALERT_DISK_THRESHOLD` | 85 | Filesystem usage % that fires an alert |
+| `ALERT_DISK_THRESHOLD` | 65 | Filesystem usage % that fires an alert |
 | `ALERT_COOLDOWN_MIN` | 60 | Don't re-alert for the same (server, mount) within this many minutes |
 
 ## Telegram alerts
 
 The dashboard can send alerts to a Telegram group or channel when:
 
-- a filesystem crosses `ALERT_DISK_THRESHOLD`% (default 85), or
+- a filesystem crosses `ALERT_DISK_THRESHOLD`% (default 65), or
 - a server that was responding stops responding (or vice-versa).
 
 Cooldown is per `(server, mount)` for disk alerts, and per `server` for
