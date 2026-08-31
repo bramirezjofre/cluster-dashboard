@@ -21,6 +21,7 @@ import { readFileSync, existsSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { Client } from 'ssh2'
 import { fileURLToPath } from 'node:url'
+import { check as checkAlerts } from './notifier.js'
 
 // __dirname equivalent for ESM. fileURLToPath(import.meta.url) gives the
 // path of THIS file (.../cluster-dashboard/src/server.js). dirname() peels
@@ -334,7 +335,19 @@ async function pollAll() {
   if (state.pollErrors > 0) console.warn(`[poll] ${state.pollErrors} server(s) failed`)
 }
 
-setInterval(() => { pollAll().catch(e => console.error('poll error', e)) }, POLL_INTERVAL_MS)
+// After every successful poll, look for things that crossed a threshold
+// and fire a Telegram alert. The notifier is no-op when ALERT_ENABLED
+// is false or when the bot token is unset, so this is safe to call
+// unconditionally. We wrap the original pollAll so every caller (the
+// initial startup poll and the interval tick) goes through the alert
+// check too.
+const _origPollAll = pollAll
+pollAll = async function() {
+  await _origPollAll()
+  checkAlerts(state).catch(e => console.error('notifier error', e))
+}
+
+setInterval(pollAll, POLL_INTERVAL_MS)
 pollAll()
 
 // --- http --------------------------------------------------------------------

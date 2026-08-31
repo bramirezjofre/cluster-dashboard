@@ -51,6 +51,50 @@ cluster-dashboard/
 | `SSH_USER` | bramirezj | Fallback user when `~/.ssh/config` doesn't set one |
 | `SSH_KEYS_DIR` | `/home/bramirezj/.ssh` | Where to read `config` + private keys |
 | `CLUSTER_SERVERS` | `server-11,server-17,server-18,server-19` | Comma-separated Host aliases |
+| `ALERT_ENABLED` | true | Set to `false` to disable Telegram alerts entirely |
+| `ALERT_TELEGRAM_BOT_TOKEN` | *(none)* | From `@BotFather`. Required for alerts |
+| `ALERT_TELEGRAM_CHAT_ID` | *(none)* | Numeric id of the group/channel the bot posts in |
+| `ALERT_DISK_THRESHOLD` | 85 | Filesystem usage % that fires an alert |
+| `ALERT_COOLDOWN_MIN` | 60 | Don't re-alert for the same (server, mount) within this many minutes |
+
+## Telegram alerts
+
+The dashboard can send alerts to a Telegram group or channel when:
+
+- a filesystem crosses `ALERT_DISK_THRESHOLD`% (default 85), or
+- a server that was responding stops responding (or vice-versa).
+
+Cooldown is per `(server, mount)` for disk alerts, and per `server` for
+reachability. A disk at 95% won't re-alert every 30s; it alerts once and
+then sits quiet for `ALERT_COOLDOWN_MIN` minutes (default 60).
+
+### Setup (one time)
+
+1. **Create a bot** with [@BotFather](https://t.me/BotFather). Send
+   `/newbot`, follow the prompts, and copy the token it gives you.
+2. **Add the bot to the group/channel** you want alerts in. Make it an
+   admin if the chat is a channel (Telegram requires it for bots to
+   post there).
+3. **Get the chat id** by sending any message to the group, then open
+   `https://api.telegram.org/bot<TOKEN>/getUpdates` and read the `chat.id`
+   field. For supergroups it will be a negative number starting with
+   `-100`; for private messages it will be a positive number.
+4. **Create `.env`** in the project root with those two values:
+
+   ```bash
+   echo 'ALERT_TELEGRAM_BOT_TOKEN=<your token>' > .env
+   echo 'ALERT_TELEGRAM_CHAT_ID=<your chat id>' >> .env
+   chmod 600 .env
+   ```
+
+   `.env` is git-ignored; the token never lands in git history.
+
+5. **Start the dashboard** with `docker compose up -d`. The first poll
+   is silent (no diff to compare against); the second poll is the one
+   that can fire alerts.
+
+To turn alerts off later, set `ALERT_ENABLED=false` in the compose
+file (or pass `ALERT_ENABLED=false` to the daemon directly).
 
 ## Host-side requirements
 

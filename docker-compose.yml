@@ -28,8 +28,21 @@ services:
       SSH_USER: "bramirezj"
       SSH_KEYS_DIR: "/home/bramirezj/.ssh"
       CLUSTER_SERVERS: "server-11,server-17,server-18,server-19"
+      # Telegram alerting. To disable, set ALERT_ENABLED=false. To enable,
+      # fill in a bot token (from @BotFather) and a chat id (the numeric
+      # id of a group the bot is admin of; you can see it in @RawDataBot
+      # output). The token and chat id live in .env (which is gitignored)
+      # rather than the compose file so they don't leak into git history.
+      ALERT_ENABLED: "true"
+      ALERT_TELEGRAM_BOT_TOKEN: ${ALERT_TELEGRAM_BOT_TOKEN}
+      ALERT_TELEGRAM_CHAT_ID: ${ALERT_TELEGRAM_CHAT_ID}
+      ALERT_DISK_THRESHOLD: "85"
+      ALERT_COOLDOWN_MIN: "60"
     volumes:
       - /home/bramirezj/.ssh:/home/bramirezj/.ssh:ro
+      # The .env file holds secrets (telegram bot token, chat id). Compose
+      # substitutes ${ALERT_*} from it. Not in the image, not in git.
+      - ./.env:/app/.env:ro
     # No healthcheck yet — the daemon listens on PORT but doesn't expose
     # a readiness probe that distinguishes "polling" from "crashed". Add a
     # GET /api/health that returns 200 only after the first successful poll
