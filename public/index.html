@@ -1,0 +1,221 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>cluster-dashboard</title>
+<style>
+  :root {
+    --bg: #0c0e12; --surface: #16191f; --surface-2: #1d2128;
+    --border: #2a2f37; --label: #e6e8ec; --label-2: #9aa1ac; --label-3: #5d6675;
+    --acc: #30d158; --warn: #ffd60a; --bad: #ff453a; --info: #0a84ff;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; background: var(--bg); color: var(--label);
+               font: 14px/1.45 -apple-system, "Segoe UI", system-ui, sans-serif; }
+  header { padding: 16px 22px; display: flex; align-items: center; gap: 16px;
+           border-bottom: 1px solid var(--border); background: var(--surface); }
+  header h1 { margin: 0; font-size: 16px; font-weight: 600; letter-spacing: -.01em; }
+  header .meta { color: var(--label-2); font-size: 12px; font-family: var(--mono); }
+  header .meta b { color: var(--label); font-weight: 500; }
+  main { padding: 22px; display: grid; gap: 16px;
+         grid-template-columns: repeat(auto-fit, minmax(360px, 1fr)); }
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
+          padding: 16px 18px; transition: border-color .2s; }
+  .card.bad { border-color: var(--bad); }
+  .card .head { display: flex; justify-content: space-between; align-items: baseline;
+                margin-bottom: 14px; gap: 8px; }
+  .card .name { font-size: 15px; font-weight: 600; }
+  .card .status { font-size: 11px; font-family: var(--mono); padding: 2px 8px;
+                  border-radius: 999px; text-transform: uppercase; letter-spacing: .05em; }
+  .card .status.ok { background: color-mix(in srgb, var(--acc) 18%, transparent); color: var(--acc); }
+  .card .status.bad { background: color-mix(in srgb, var(--bad) 18%, transparent); color: var(--bad); }
+  .card .err { color: var(--bad); font-family: var(--mono); font-size: 12px;
+               background: var(--surface-2); padding: 8px 10px; border-radius: 8px; margin-top: 8px; }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  .stat { background: var(--surface-2); border-radius: 10px; padding: 10px 12px; }
+  .stat .l { font-size: 11px; color: var(--label-3); text-transform: uppercase;
+             letter-spacing: .06em; margin-bottom: 4px; }
+  .stat .v { font-size: 19px; font-family: var(--mono); font-weight: 500;
+             letter-spacing: -.01em; }
+  .stat .v small { color: var(--label-2); font-size: 12px; font-weight: 400;
+                   margin-left: 4px; }
+  .spark { width: 100%; height: 38px; margin-top: 6px; display: block; }
+  .spark path.area { fill: var(--acc); fill-opacity: .12; stroke: none; }
+  .spark path.line { fill: none; stroke: var(--acc); stroke-width: 1.5; }
+  .card.bad .spark path.area { fill: var(--bad); fill-opacity: .12; }
+  .card.bad .spark path.line { stroke: var(--bad); }
+  .bar { background: var(--surface-2); border-radius: 4px; height: 6px;
+         margin-top: 6px; overflow: hidden; }
+  .bar > i { display: block; height: 100%; background: var(--acc);
+             transition: width .3s, background .3s; }
+  .bar.warn > i { background: var(--warn); }
+  .bar.bad > i { background: var(--bad); }
+  .disks { margin-top: 10px; display: flex; flex-direction: column; gap: 6px; }
+  .disk { font-size: 11px; font-family: var(--mono); color: var(--label-2); }
+  .disk .name { color: var(--label-3); }
+  .loading { color: var(--label-3); font-style: italic; }
+</style>
+</head>
+<body>
+<header>
+  <h1>cluster-dashboard</h1>
+  <div class="meta">
+    refreshing every <b id="iv">30</b>s · last poll <b id="last">…</b> · <b id="errs">0</b> error(s)
+  </div>
+</header>
+<main id="cards">
+  <div class="loading">loading…</div>
+</main>
+<script>
+const POLL_MS = 30_000
+const CARDS = document.getElementById('cards')
+const elLast = document.getElementById('last')
+const elErrs = document.getElementById('errs')
+const elIv = document.getElementById('iv')
+
+// Build a polyline + area path from a series of values scaled to the SVG
+// viewport. The series is plain numbers; we rescale to 0..max so a flat
+// line at the top doesn't collapse to zero width.
+function sparkPath(values, w = 320, h = 38) {
+  if (!values || values.length < 2) return { line: '', area: '' }
+  const max = Math.max(...values, 1)
+  const min = Math.min(...values, 0)
+  const range = Math.max(max - min, 0.001)
+  const stepX = w / (values.length - 1)
+  const points = values.map((v, i) => {
+    const x = i * stepX
+    const y = h - ((v - min) / range) * (h - 4) - 2
+    return [x.toFixed(1), y.toFixed(1)]
+  })
+  const line = 'M' + points.map(p => p.join(',')).join(' L')
+  const area = line + ` L${w},${h} L0,${h} Z`
+  return { line, area }
+}
+
+// Color threshold for the CPU/RAM/disk bars. The numbers are arbitrary —
+// tuned for a small server; adjust if you ever monitor a beefier box.
+function colorFor(pct, kind) {
+  if (kind === 'cpu') return pct >= 85 ? 'bad' : pct >= 60 ? 'warn' : ''
+  if (kind === 'mem') return pct >= 90 ? 'bad' : pct >= 75 ? 'warn' : ''
+  if (kind === 'disk') return pct >= 85 ? 'bad' : pct >= 70 ? 'warn' : ''
+  return ''
+}
+
+function fmtBytes(mb) {
+  if (mb >= 1024) return (mb / 1024).toFixed(1) + ' GB'
+  return Math.round(mb) + ' MB'
+}
+function fmtUptime(sec) {
+  if (!sec) return '—'
+  const d = Math.floor(sec / 86400), h = Math.floor((sec % 86400) / 3600),
+        m = Math.floor((sec % 3600) / 60)
+  if (d > 0) return `${d}d ${h}h`
+  if (h > 0) return `${h}h ${m}m`
+  return `${m}m`
+}
+function fmtAgo(ts) {
+  if (!ts) return '—'
+  const s = Math.floor((Date.now() - ts) / 1000)
+  if (s < 60) return s + 's ago'
+  if (s < 3600) return Math.floor(s / 60) + 'm ago'
+  return Math.floor(s / 3600) + 'h ago'
+}
+
+function renderCard(alias, s, h) {
+  const ok = s.ok && s.last
+  const last = s.last
+  const sparkSvg = (vals) => `<svg class="spark" viewBox="0 0 320 38" preserveAspectRatio="none">` +
+    (() => { const p = sparkPath(vals); return `<path class="area" d="${p.area}"/><path class="line" d="${p.line}"/>` })() +
+    `</svg>`
+  const cpuPct = ok ? last.cpu : 0
+  const memPct = ok ? last.memPct : 0
+  const disks = (ok && last.disks) ? last.disks : []
+  return `
+    <div class="card ${ok ? '' : 'bad'}">
+      <div class="head">
+        <div>
+          <div class="name">${alias}</div>
+          <div class="meta" style="font-size:11px;color:var(--label-3);font-family:var(--mono);margin-top:2px;">
+            ${ok ? last.hostname + ' · ' + last.distro : '—'}
+          </div>
+        </div>
+        <span class="status ${ok ? 'ok' : 'bad'}">${ok ? 'online' : 'offline'}</span>
+      </div>
+
+      ${ok ? `
+        <div class="grid2">
+          <div class="stat">
+            <div class="l">CPU</div>
+            <div class="v">${cpuPct.toFixed(1)}<small>%</small></div>
+            <div class="bar ${colorFor(cpuPct, 'cpu')}"><i style="width:${Math.min(cpuPct, 100)}%"></i></div>
+            ${sparkSvg(h.cpu)}
+          </div>
+          <div class="stat">
+            <div class="l">Memory</div>
+            <div class="v">${memPct.toFixed(0)}<small>%</small></div>
+            <div class="bar ${colorFor(memPct, 'mem')}"><i style="width:${Math.min(memPct, 100)}%"></i></div>
+            ${sparkSvg(h.mem)}
+          </div>
+          <div class="stat">
+            <div class="l">Load (1m)</div>
+            <div class="v">${last.load1.toFixed(2)}</div>
+            ${sparkSvg(h.load1)}
+          </div>
+          <div class="stat">
+            <div class="l">Uptime</div>
+            <div class="v">${fmtUptime(last.uptime)}</div>
+            <div style="margin-top:8px;font-size:11px;color:var(--label-3);font-family:var(--mono);">
+              mem ${fmtBytes(last.memUsedMB)} / ${fmtBytes(last.memTotalMB)}
+            </div>
+          </div>
+        </div>
+
+        ${disks.length ? `
+          <div class="disks">
+            ${disks.map(d => `
+              <div class="disk">
+                <div style="display:flex;justify-content:space-between;">
+                  <span class="name">${d.mount}</span>
+                  <span>${d.usedPct}% · ${d.totalGB} GB</span>
+                </div>
+                <div class="bar ${colorFor(d.usedPct, 'disk')}"><i style="width:${Math.min(d.usedPct, 100)}%"></i></div>
+              </div>
+            `).join('')}
+          </div>
+        ` : ''}
+
+        <div style="margin-top:12px;font-size:11px;color:var(--label-3);font-family:var(--mono);display:flex;gap:12px;flex-wrap:wrap;">
+          <span>${last.containers} container(s</span>
+          <span>net ↓ ${last.net_rx_kbps || 0} KB/s</span>
+          <span>net ↑ ${last.net_tx_kbps || 0} KB/s</span>
+          <span>updated ${fmtAgo(last.ts)}</span>
+        </div>
+      ` : `
+        <div class="err">${s.error || 'unreachable'}</div>
+        ${sparkSvg([])}
+      `}
+    </div>
+  `
+}
+
+async function tick() {
+  try {
+    const r = await fetch('/api/cluster/status', { cache: 'no-store' })
+    const d = await r.json()
+    elLast.textContent = fmtAgo(d.lastPollAt)
+    elErrs.textContent = String(d.pollErrors || 0)
+    elIv.textContent = String(Math.round((d.pollIntervalMs || 30000) / 1000))
+    const cards = Object.entries(d.servers).map(([alias, s]) => renderCard(alias, s, d.history[alias] || {}))
+    CARDS.innerHTML = cards.join('') || '<div class="loading">no servers configured</div>'
+  } catch (e) {
+    elLast.textContent = 'fetch failed: ' + e.message
+  }
+}
+
+tick()
+setInterval(tick, POLL_MS)
+</script>
+</body>
+</html>

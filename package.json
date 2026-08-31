@@ -1,0 +1,15 @@
+{
+  "name": "cluster-dashboard",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Self-hosted dashboard that polls a fleet of servers over SSH and renders uptime/CPU/RAM/disk/container metrics with sparklines.",
+  "scripts": {
+    "start": "node src/server.js"
+  },
+  "dependencies": {
+    "express": "^4.21.2",
+    "ssh2": "^1.16.0"
+  },
+  "license": "AGPL-3.0-or-later"
+}
