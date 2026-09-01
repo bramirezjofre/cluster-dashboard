@@ -5,6 +5,13 @@ name: cluster-dashboard
 # user must exist in /etc/passwd inside the container at the UID the keys
 # are owned by — the Dockerfile defaults to 1000:1000 (bramirezj on this
 # host); override via BUILD_UID/BUILD_GID if yours is different.
+#
+# Servers polled are controlled by CLUSTER_SERVERS (comma-separated ssh
+# aliases from ~/.ssh/config). The current set: server-11 (RPi), server-17
+# (SSD 224GB), server-18 (HDD 500GB), server-19 (HDD 160GB), and
+# server-agentes (Ubuntu 24, 8 cores, the only one with /mnt/data
+# attached). To drop one, remove it from the env var and recreate the
+# container.
 
 services:
   dashboard:
@@ -27,7 +34,7 @@ services:
       SSH_CMD_TIMEOUT_MS: "4000"
       SSH_USER: "bramirezj"
       SSH_KEYS_DIR: "/home/bramirezj/.ssh"
-      CLUSTER_SERVERS: "server-11,server-17,server-18,server-19"
+      CLUSTER_SERVERS: "server-11,server-17,server-18,server-19,server-agentes"
       # Telegram alerting. To disable, set ALERT_ENABLED=false. To enable,
       # fill in a bot token (from @BotFather) and a chat id (the numeric
       # id of a group the bot is admin of; you can see it in @RawDataBot
