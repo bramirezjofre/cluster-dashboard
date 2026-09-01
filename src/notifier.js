@@ -45,6 +45,62 @@ try {
   if (existsSync(STATE_FILE)) lastSent = JSON.parse(readFileSync(STATE_FILE, 'utf8'))
 } catch (e) { lastSent = {} }
 
+// Per-server counter of consecutive failed polls. The reachability alert
+// only fires after CONSECUTIVE_FAILS_THRESHOLD consecutive failures, so a
+// transient ssh timeout doesn't generate a false-positive "server down"
+// message. As soon as the server comes back to ok=true the counter is
+// reset. Persisted to STATE_FILE so a container restart mid-outage
+// doesn't reset the counter to zero (otherwise a restart that coincided
+// with a real outage would mask the alert by making us wait another
+// 2 polls from scratch).
+//
+// {
+//   "server-11": { "consecFails": 1, "firstFailTs": 1788232000000 },
+//   "server-17": { "consecFails": 0, "firstFailTs": 0 }
+// }
+const CONSECUTIVE_FAILS_THRESHOLD = 2
+let failCounters = {}
+try {
+  if (existsSync(STATE_FILE)) {
+    const saved = JSON.parse(readFileSync(STATE_FILE, 'utf8'))
+    // alert-state.json is shared between lastSent and failCounters.
+    // Older versions only had lastSent — keep going if failCounters
+    // is missing from the file.
+    if (saved && typeof saved.failCounters === 'object' && saved.failCounters) {
+      failCounters = saved.failCounters
+    }
+  }
+} catch (e) { failCounters = {} }
+
+function bumpFails(alias, okNow) {
+  if (okNow) {
+    // Recovered — clear the counter. We do NOT delete the key; we reset
+    // the fields. The next failure starts fresh from 0.
+    if (failCounters[alias]) {
+      failCounters[alias] = { consecFails: 0, firstFailTs: 0 }
+      persistCounters()
+    }
+    return 0
+  }
+  if (!failCounters[alias]) failCounters[alias] = { consecFails: 0, firstFailTs: 0 }
+  failCounters[alias].consecFails += 1
+  if (failCounters[alias].firstFailTs === 0) failCounters[alias].firstFailTs = Date.now()
+  persistCounters()
+  return failCounters[alias].consecFails
+}
+
+function persistCounters() {
+  try {
+    // Read-modify-write so we don't clobber the lastSent timestamps
+    // that markSent() also writes here. Cheap (file is a few hundred
+    // bytes) and atomic-ish on POSIX (single write of small JSON).
+    let disk = {}
+    try { disk = JSON.parse(readFileSync(STATE_FILE, 'utf8')) } catch (e) { disk = {} }
+    disk.failCounters = failCounters
+    writeFileSync(STATE_FILE, JSON.stringify(disk))
+  } catch (e) { /* */ }
+}
+
 function inCooldown(key) {
   const ts = lastSent[key]
   if (!ts) return false
@@ -141,16 +197,33 @@ export async function check(state) {
   for (const [alias, srv] of Object.entries(state.servers)) {
     const prevSrv = prev.servers[alias] || { ok: false, last: null, error: null }
 
-    // Reachability transitions
-    if (prevSrv.ok === true && srv.ok === false) {
-      const key = `server:${alias}:down`
-      if (!inCooldown(key)) {
-        fires.push({ key, text: serverAlertMsg(alias, srv.last?.hostname || alias, 'down') })
+    // Reachability transitions.
+    //
+    // Down: only fire after CONSECUTIVE_FAILS_THRESHOLD consecutive
+    // failed polls. A single ssh timeout (network blip, server load
+    // spike, daemon busy) shouldn't generate a "server down" alert.
+    // We still update the snapshot in `prev` every poll so the
+    // transition detection works correctly.
+    //
+    // Up: fire on the FIRST successful poll after a down period. No
+    // threshold here — recovery is the easy direction (you want to
+    // know quickly).
+    if (!srv.ok) {
+      const count = bumpFails(alias, false)
+      // Only fire when the counter just crossed the threshold. This
+      // avoids re-firing every poll while the server stays down — the
+      // 60-minute cooldown on the `server:<alias>:down` key handles
+      // re-alerting if the server keeps failing past that.
+      if (count === CONSECUTIVE_FAILS_THRESHOLD && prevSrv.ok === true && !inCooldown(`server:${alias}:down`)) {
+        fires.push({ key: `server:${alias}:down`, text: serverAlertMsg(alias, srv.last?.hostname || alias, 'down') })
       }
-    } else if (prevSrv.ok === false && srv.ok === true) {
-      const key = `server:${alias}:up`
-      if (!inCooldown(key)) {
-        fires.push({ key, text: serverAlertMsg(alias, srv.last?.hostname || alias, 'up') })
+    } else {
+      bumpFails(alias, true)
+      if (prevSrv.ok === false) {
+        const key = `server:${alias}:up`
+        if (!inCooldown(key)) {
+          fires.push({ key, text: serverAlertMsg(alias, srv.last?.hostname || alias, 'up') })
+        }
       }
     }
 
