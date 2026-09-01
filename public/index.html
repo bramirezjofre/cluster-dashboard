@@ -66,12 +66,16 @@
   .card { cursor: pointer; }
   .card:hover { border-color: var(--label-3); }
   .card.bad:hover { border-color: var(--bad); }
+  /* The 'N containers' pill used to be the only click target inside the
+     card. We made the whole card clickable in revision 2 of the modal
+     feature (see commit "Add docker container modal" follow-up), so the
+     pill is now decorative. Keep the cursor:pointer style on it too so
+     that if the user happens to click the pill text directly, they get
+     visual feedback that the whole card is interactive. */
   .card .head .containers-pill {
     font-size: 11px; font-family: var(--mono); color: var(--label-2);
     background: var(--surface-2); padding: 2px 8px; border-radius: 999px;
-    cursor: pointer;
   }
-  .card .head .containers-pill:hover { background: var(--border); color: var(--label); }
 
   /* --- modals ------------------------------------------------------------- */
   .modal-bg {
@@ -202,7 +206,7 @@ function renderCard(alias, s, h) {
   const memPct = ok ? last.memPct : 0
   const disks = (ok && last.disks) ? last.disks : []
   return `
-    <div class="card ${ok ? '' : 'bad'}">
+    <div class="card ${ok ? '' : 'bad'}" data-action="containers" data-alias="${alias}">
       <div class="head">
         <div>
           <div class="name">${alias}</div>
@@ -256,7 +260,7 @@ function renderCard(alias, s, h) {
         ` : ''}
 
         <div style="margin-top:12px;font-size:11px;color:var(--label-3);font-family:var(--mono);display:flex;gap:12px;flex-wrap:wrap;align-items:center;">
-          <span class="containers-pill" data-action="containers" data-alias="${alias}">${last.containers} container(s) →</span>
+          <span class="containers-pill">${last.containers} container(s) →</span>
           <span>net ↓ ${last.net_rx_kbps || 0} KB/s</span>
           <span>net ↑ ${last.net_tx_kbps || 0} KB/s</span>
           <span>updated ${fmtAgo(last.ts)}</span>
