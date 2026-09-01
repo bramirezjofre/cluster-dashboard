@@ -459,10 +459,14 @@ async function openLogsModal(alias, name) {
   })
 }
 
-// Event delegation: cards re-render every 30s, so attaching click
-// handlers to each card would leak. Listen once on the parent and
-// dispatch based on data-action attributes.
-CARDS.addEventListener('click', (e) => {
+// Event delegation: the [data-action] elements live in two different
+// subtrees — the cards live inside #cards, but the container rows in
+// the modal live inside the modal which is appended to document.body.
+// A listener on CARDS would catch only the first set; we need to
+// listen on document so the modal rows bubble up to us too.
+// closest('[data-action]') still scopes the handler to the elements
+// we actually care about, so we don't fire on background clicks.
+document.addEventListener('click', (e) => {
   const target = e.target.closest('[data-action]')
   if (!target) return
   e.preventDefault()
