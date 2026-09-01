@@ -56,6 +56,75 @@
   .disk { font-size: 11px; font-family: var(--mono); color: var(--label-2); }
   .disk .name { color: var(--label-3); }
   .loading { color: var(--label-3); font-style: italic; }
+
+  /* --- card clickability -------------------------------------------------- */
+  /* Cards became clickable when the container-inspector feature shipped
+     (commit "Add docker container modal"). We use a subtle hover state
+     and a pointer cursor to hint at it. The card itself is not a button
+     (we still want to be able to select text inside it), so we listen
+     for clicks via event delegation on the #cards container. */
+  .card { cursor: pointer; }
+  .card:hover { border-color: var(--label-3); }
+  .card.bad:hover { border-color: var(--bad); }
+  .card .head .containers-pill {
+    font-size: 11px; font-family: var(--mono); color: var(--label-2);
+    background: var(--surface-2); padding: 2px 8px; border-radius: 999px;
+    cursor: pointer;
+  }
+  .card .head .containers-pill:hover { background: var(--border); color: var(--label); }
+
+  /* --- modals ------------------------------------------------------------- */
+  .modal-bg {
+    position: fixed; inset: 0; background: rgba(0,0,0,.55); z-index: 50;
+    display: flex; align-items: center; justify-content: center;
+    padding: 24px;
+  }
+  .modal {
+    background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
+    width: 100%; max-width: 720px; max-height: 80vh; display: flex; flex-direction: column;
+    overflow: hidden;
+  }
+  .modal.wide { max-width: 960px; }
+  .modal .mh {
+    display: flex; justify-content: space-between; align-items: center; gap: 12px;
+    padding: 14px 18px; border-bottom: 1px solid var(--border);
+  }
+  .modal .mh h2 { margin: 0; font-size: 15px; font-weight: 600; }
+  .modal .mh .sub { font-size: 11px; color: var(--label-3); font-family: var(--mono); }
+  .modal .mh button.close {
+    background: transparent; border: 0; color: var(--label-2); font-size: 18px;
+    cursor: pointer; padding: 0 6px; line-height: 1;
+  }
+  .modal .mh button.close:hover { color: var(--label); }
+  .modal .mb { padding: 14px 18px; overflow-y: auto; flex: 1; }
+  .modal .mf {
+    padding: 10px 18px; border-top: 1px solid var(--border);
+    font-size: 11px; color: var(--label-3); font-family: var(--mono);
+    display: flex; justify-content: space-between; align-items: center;
+  }
+  .container-row {
+    display: grid; grid-template-columns: 24px 1fr 1fr auto; gap: 10px;
+    align-items: center; padding: 8px 10px; border-radius: 8px;
+    cursor: pointer; font-family: var(--mono); font-size: 12px;
+  }
+  .container-row:hover { background: var(--surface-2); }
+  .container-row .dot { width: 8px; height: 8px; border-radius: 999px; background: var(--label-3); justify-self: center; }
+  .container-row .dot.up { background: var(--acc); }
+  .container-row .dot.down { background: var(--label-3); }
+  .container-row .name { color: var(--label); font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .container-row .image { color: var(--label-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .container-row .status { color: var(--label-2); font-size: 11px; }
+  .log-box {
+    background: #0a0c10; border: 1px solid var(--border); border-radius: 8px;
+    padding: 12px 14px; font-family: var(--mono); font-size: 12px; line-height: 1.55;
+    color: #cdd3df; max-height: 60vh; overflow-y: auto; white-space: pre-wrap;
+    word-break: break-all;
+  }
+  .log-box .empty { color: var(--label-3); font-style: italic; }
+  .err-banner {
+    color: var(--bad); font-family: var(--mono); font-size: 12px;
+    background: var(--surface-2); padding: 10px 12px; border-radius: 8px;
+  }
 </style>
 </head>
 <body>
@@ -186,8 +255,8 @@ function renderCard(alias, s, h) {
           </div>
         ` : ''}
 
-        <div style="margin-top:12px;font-size:11px;color:var(--label-3);font-family:var(--mono);display:flex;gap:12px;flex-wrap:wrap;">
-          <span>${last.containers} container(s</span>
+        <div style="margin-top:12px;font-size:11px;color:var(--label-3);font-family:var(--mono);display:flex;gap:12px;flex-wrap:wrap;align-items:center;">
+          <span class="containers-pill" data-action="containers" data-alias="${alias}">${last.containers} container(s) →</span>
           <span>net ↓ ${last.net_rx_kbps || 0} KB/s</span>
           <span>net ↑ ${last.net_tx_kbps || 0} KB/s</span>
           <span>updated ${fmtAgo(last.ts)}</span>
@@ -216,6 +285,188 @@ async function tick() {
 
 tick()
 setInterval(tick, POLL_MS)
+
+// --- docker container inspector --------------------------------------------
+//
+// Click a card → opens the containers modal for that server.
+// Click a row in the modal → opens the logs modal for that container.
+//
+// The modals are built imperatively (single template, populated after
+// fetch) rather than as JSX/templates — keeps the file single-file and
+// matches the rest of the dashboard's vanilla style.
+
+const ACTIVE_MODAL_BG = document.createElement('div') // reused element for layering
+
+function closeModal() {
+  ACTIVE_MODAL_BG.remove()
+  document.removeEventListener('keydown', onEscClose)
+}
+function onEscClose(e) { if (e.key === 'Escape') closeModal() }
+
+function openModal({ title, sub, bodyHtml, footerHtml = '', wide = false }) {
+  ACTIVE_MODAL_BG.className = 'modal-bg'
+  ACTIVE_MODAL_BG.innerHTML = `
+    <div class="modal ${wide ? 'wide' : ''}" onclick="event.stopPropagation()">
+      <div class="mh">
+        <div>
+          <h2>${escapeHtml(title)}</h2>
+          ${sub ? `<div class="sub">${escapeHtml(sub)}</div>` : ''}
+        </div>
+        <button class="close" aria-label="close">×</button>
+      </div>
+      <div class="mb">${bodyHtml}</div>
+      ${footerHtml ? `<div class="mf">${footerHtml}</div>` : ''}
+    </div>
+  `
+  ACTIVE_MODAL_BG.addEventListener('click', closeModal)
+  ACTIVE_MODAL_BG.querySelector('button.close').addEventListener('click', closeModal)
+  document.addEventListener('keydown', onEscClose)
+  document.body.appendChild(ACTIVE_MODAL_BG)
+}
+
+// Plain-text-safe HTML escape. The container names and image strings
+// come from a remote shell, so we MUST treat them as untrusted — a
+// malicious image name like "<img onerror=…>" would otherwise XSS us.
+function escapeHtml(s) {
+  return String(s ?? '').replace(/[&<>"']/g, c => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+  }[c]))
+}
+
+// Short status text. Docker's "Up 3 hours" becomes "up · 3h", "Exited
+// (0) 5 minutes ago" becomes "down · 5m". We don't try to parse every
+// status — just the leading "Up "/"Exited "/"Restarting "/"Created "
+// prefixes, and fall back to the raw string for anything weirder.
+function fmtStatus(s) {
+  const lower = (s || '').toLowerCase()
+  if (lower.startsWith('up ')) return { up: true, text: 'up · ' + s.slice(3) }
+  if (lower.startsWith('exited')) return { up: false, text: s }
+  if (lower.startsWith('restarting')) return { up: false, text: s }
+  if (lower.startsWith('created')) return { up: false, text: s }
+  if (lower.startsWith('dead')) return { up: false, text: s }
+  return { up: false, text: s || '?' }
+}
+
+async function openContainersModal(alias) {
+  openModal({
+    title: `containers · ${alias}`,
+    sub: 'loading…',
+    bodyHtml: '<div class="loading">ssh ' + escapeHtml(alias) + ' → docker ps -a …</div>',
+  })
+  let data
+  try {
+    const r = await fetch(`/api/server/${encodeURIComponent(alias)}/containers`, { cache: 'no-store' })
+    data = await r.json()
+  } catch (e) {
+    closeModal()
+    openModal({ title: `containers · ${alias}`, bodyHtml: `<div class="err-banner">fetch failed: ${escapeHtml(e.message)}</div>` })
+    return
+  }
+  if (!data.ok) {
+    closeModal()
+    openModal({
+      title: `containers · ${alias}`,
+      bodyHtml: `<div class="err-banner">${escapeHtml(data.error || 'unknown error')}</div>`,
+    })
+    return
+  }
+  if (!data.dockerAvailable) {
+    closeModal()
+    openModal({
+      title: `containers · ${alias}`,
+      sub: 'docker not available on this host',
+      bodyHtml: `<div class="loading">No docker binary or socket reachable on ${escapeHtml(alias)}. Either docker isn't installed or the bramirezj user can't reach the daemon.</div>`,
+    })
+    return
+  }
+  if (!data.containers.length) {
+    closeModal()
+    openModal({
+      title: `containers · ${alias}`,
+      sub: 'no containers',
+      bodyHtml: `<div class="loading">No containers (running or stopped) on ${escapeHtml(alias)}.</div>`,
+    })
+    return
+  }
+  // Sort: running first, then by name. "Up " comes first, then
+  // everything else (Exited, Restarting, Created).
+  const sorted = [...data.containers].sort((a, b) => {
+    const ua = (a.status || '').toLowerCase().startsWith('up ')
+    const ub = (b.status || '').toLowerCase().startsWith('up ')
+    if (ua !== ub) return ua ? -1 : 1
+    return (a.name || '').localeCompare(b.name || '')
+  })
+  const rows = sorted.map(c => {
+    const st = fmtStatus(c.status)
+    return `
+      <div class="container-row" data-action="logs" data-alias="${escapeHtml(alias)}" data-name="${escapeHtml(c.name)}">
+        <span class="dot ${st.up ? 'up' : 'down'}"></span>
+        <span class="name">${escapeHtml(c.name)}</span>
+        <span class="image">${escapeHtml(c.image)}</span>
+        <span class="status">${escapeHtml(st.text)}</span>
+      </div>
+    `
+  }).join('')
+  const upCount = sorted.filter(c => (c.status || '').toLowerCase().startsWith('up ')).length
+  closeModal()
+  openModal({
+    title: `containers · ${alias}`,
+    sub: `${sorted.length} total · ${upCount} up`,
+    bodyHtml: rows,
+  })
+}
+
+async function openLogsModal(alias, name) {
+  openModal({
+    title: `logs · ${name}`,
+    sub: `last 10 lines · ${alias}`,
+    bodyHtml: `<div class="loading">ssh ${escapeHtml(alias)} → docker logs --tail=10 ${escapeHtml(name)} …</div>`,
+    wide: true,
+  })
+  let data
+  try {
+    const r = await fetch(`/api/server/${encodeURIComponent(alias)}/container/${encodeURIComponent(name)}/logs?lines=10`, { cache: 'no-store' })
+    data = await r.json()
+  } catch (e) {
+    closeModal()
+    openModal({ title: `logs · ${name}`, bodyHtml: `<div class="err-banner">fetch failed: ${escapeHtml(e.message)}</div>`, wide: true })
+    return
+  }
+  if (!data.ok) {
+    closeModal()
+    openModal({
+      title: `logs · ${name}`,
+      sub: alias,
+      bodyHtml: `<div class="err-banner">${escapeHtml(data.error || 'unknown error')}</div>`,
+      wide: true,
+    })
+    return
+  }
+  const body = data.logs && data.logs.trim()
+    ? `<div class="log-box">${escapeHtml(data.logs)}</div>`
+    : `<div class="log-box"><span class="empty">(container has no log output yet)</span></div>`
+  closeModal()
+  openModal({
+    title: `logs · ${name}`,
+    sub: `last ${data.lines} lines · ${alias} · fetched ${fmtAgo(data.fetchedAt)}`,
+    bodyHtml: body,
+    footerHtml: `<span>tail -n ${data.lines}</span><span>esc / click outside to close</span>`,
+    wide: true,
+  })
+}
+
+// Event delegation: cards re-render every 30s, so attaching click
+// handlers to each card would leak. Listen once on the parent and
+// dispatch based on data-action attributes.
+CARDS.addEventListener('click', (e) => {
+  const target = e.target.closest('[data-action]')
+  if (!target) return
+  e.preventDefault()
+  const action = target.dataset.action
+  const alias = target.dataset.alias
+  if (action === 'containers') openContainersModal(alias)
+  else if (action === 'logs') openLogsModal(alias, target.dataset.name)
+})
 </script>
 </body>
 </html>

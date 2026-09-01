@@ -210,12 +210,17 @@ function matchWildcard(pattern, str) {
   return re.test(str)
 }
 
-// Run a single SSH exec and return parsed metrics or null on failure.
-function pollServer(alias) {
+// Run a single SSH exec against an alias. Returns a Promise<{ok, stdout,
+// stderr, error}> — never throws. Used by pollServer (metrics) and the
+// two on-demand endpoints below (containers list, container logs).
+//
+// The shape mirrors pollServer so callers can branch on ok/error
+// uniformly. The script is passed as-is and exec'd via conn.exec.
+function runSshCommand(alias, script, timeoutMs = SSH_CMD_TIMEOUT_MS) {
   return new Promise(resolve => {
     const cfg = loadSshConfig(alias)
     if (!cfg.identity || !existsSync(cfg.identity)) {
-      return resolve({ alias, ok: false, error: `no identity for ${alias}` })
+      return resolve({ ok: false, error: `no identity for ${alias}` })
     }
     const conn = new Client()
     let settled = false
@@ -226,34 +231,43 @@ function pollServer(alias) {
       try { conn.destroy() } catch {}
       resolve(result)
     }
-    const t = setTimeout(() => done({ alias, ok: false, error: 'connect timeout' }), SSH_CONNECT_TIMEOUT_MS)
+    const t = setTimeout(() => done({ ok: false, error: 'connect timeout' }), SSH_CONNECT_TIMEOUT_MS)
     conn.on('ready', () => {
       clearTimeout(t)
-      conn.exec(REMOTE_SCRIPT, { pty: false }, (err, stream) => {
-        if (err) return done({ alias, ok: false, error: err.message })
+      conn.exec(script, { pty: false }, (err, stream) => {
+        if (err) return done({ ok: false, error: err.message })
         let out = '', errOut = ''
         const cmdT = setTimeout(() => {
           stream.close()
-          done({ alias, ok: false, error: 'command timeout', partial: out })
-        }, SSH_CMD_TIMEOUT_MS)
+          done({ ok: false, error: 'command timeout', partial: out })
+        }, timeoutMs)
         stream.on('data', d => { out += d.toString('utf8') })
         stream.stderr.on('data', d => { errOut += d.toString('utf8') })
         stream.on('close', (code) => {
           clearTimeout(cmdT)
-          if (code !== 0) return done({ alias, ok: false, error: `exit ${code}`, stderr: errOut.slice(0, 500), partial: out })
-          const parsed = parseScriptOutput(out)
-          done({ alias, ok: true, ts: Date.now(), cfg, ...parsed })
+          if (code !== 0) return done({ ok: false, error: `exit ${code}`, stderr: errOut.slice(0, 500), partial: out })
+          done({ ok: true, stdout: out, stderr: errOut })
         })
       })
     })
-    conn.on('error', (err) => { clearTimeout(t); done({ alias, ok: false, error: err.message }) })
-    conn.on('timeout', () => { clearTimeout(t); done({ alias, ok: false, error: 'handshake timeout' }) })
+    conn.on('error', (err) => { clearTimeout(t); done({ ok: false, error: err.message }) })
+    conn.on('timeout', () => { clearTimeout(t); done({ ok: false, error: 'handshake timeout' }) })
     conn.connect({
       host: cfg.host,
       port: 22,
       username: cfg.user,
       privateKey: readFileSync(cfg.identity),
       readyTimeout: SSH_CONNECT_TIMEOUT_MS,
+    })
+  })
+}
+
+// Run a single SSH exec and return parsed metrics or null on failure.
+function pollServer(alias) {
+  return new Promise(resolve => {
+    runSshCommand(alias, REMOTE_SCRIPT).then(r => {
+      if (!r.ok) return resolve({ alias, ok: false, error: r.error })
+      resolve({ alias, ok: true, ts: Date.now(), ...parseScriptOutput(r.stdout) })
     })
   })
 }
@@ -365,6 +379,99 @@ app.get('/api/cluster/status', (_req, res) => {
   })
 })
 app.get('/api/health', (_req, res) => res.json({ ok: true, uptime: process.uptime() }))
+
+// --- docker container inspection --------------------------------------------
+//
+// Two on-demand endpoints. Both SSH into the requested server and exec
+// docker commands. We don't cache — the dashboard is meant to reflect
+// the live state when the user clicks, not a 30s-stale snapshot.
+//
+// Containers list uses `docker ps -a` so stopped/exited containers are
+// also visible (useful for spotting something that crashed in a poll
+// interval). Each row has name, status (the short human string Docker
+// shows), image, and uptime-from-created.
+//
+// Logs endpoint passes --tail=N to docker logs, which is cheap. We cap
+// the response at 50 KB to avoid pathological cases (containers that
+// emit huge single lines — webpack dev servers, JSON.stringify of
+// large blobs — can produce many MB of stdout per "10 lines").
+
+const LOG_TAIL_DEFAULT = 10
+const LOG_TAIL_MAX = 200
+const LOG_RESPONSE_CAP_BYTES = 50 * 1024
+
+app.get('/api/server/:alias/containers', async (req, res) => {
+  const alias = req.params.alias
+  if (!SERVERS.includes(alias)) {
+    return res.status(404).json({ ok: false, error: `unknown server ${alias}` })
+  }
+  // Use --format to get one record per line, pipe-separated. Names can
+  // repeat on duplicate-container names but `docker ps` de-dupes by
+  // default. `{{.Names}}` returns the first name if there are multiple.
+  const script = `docker ps -a --no-trunc --format '{{.Names}}\\t{{.Status}}\\t{{.Image}}\\t{{.CreatedAt}}\\t{{.Ports}}' 2>&1`
+  const r = await runSshCommand(alias, script, SSH_CMD_TIMEOUT_MS)
+  if (!r.ok) {
+    // If the server doesn't have docker at all, `docker ps` exits 1
+    // with "command not found". Treat that as "no containers" rather
+    // than an error so the modal can show a friendly message.
+    if (/command not found|Cannot connect to the Docker daemon|no such file/i.test(r.error + (r.stderr || ''))) {
+      return res.json({ ok: true, alias, containers: [], dockerAvailable: false })
+    }
+    return res.json({ ok: false, alias, error: r.error, stderr: (r.stderr || '').slice(0, 500) })
+  }
+  const containers = r.stdout
+    .split('\n')
+    .map(l => l.trim())
+    .filter(Boolean)
+    .map(line => {
+      const [name, status, image, createdAt, ports] = line.split('\t')
+      return { name, status, image, createdAt, ports }
+    })
+  res.json({ ok: true, alias, containers, dockerAvailable: true })
+})
+
+app.get('/api/server/:alias/container/:name/logs', async (req, res) => {
+  const alias = req.params.alias
+  const name = req.params.name
+  if (!SERVERS.includes(alias)) {
+    return res.status(404).json({ ok: false, error: `unknown server ${alias}` })
+  }
+  if (!name || !/^[A-Za-z0-9_.-]+$/.test(name)) {
+    // Defensive: docker container names are restricted to this charset.
+    // Reject anything else so a typo or path-traversal doesn't reach ssh.
+    return res.status(400).json({ ok: false, error: 'invalid container name' })
+  }
+  const requested = Math.max(1, Math.min(LOG_TAIL_MAX, +(req.query.lines || LOG_TAIL_DEFAULT)))
+  // 2>&1 merges stderr so we capture crash dumps from crashed containers.
+  // We do NOT use -t (timestamps) here — the dashboard prepends the
+  // fetch time to the response instead. `docker logs --timestamps`
+  // would give us per-line timestamps but at the cost of an extra
+  // second of parsing per line; we don't need that for a 10-line view.
+  const script = `docker logs --tail=${requested} '${name.replace(/'/g, "'\\''")}' 2>&1`
+  const r = await runSshCommand(alias, script, SSH_CMD_TIMEOUT_MS)
+  if (!r.ok) {
+    // `docker logs` returns exit 1 if the container doesn't exist.
+    // Distinguish that from a real ssh failure so the UI can say
+    // "container not found" vs "couldn't reach the server".
+    if (/No such container|requires argument/i.test((r.stderr || '') + r.partial)) {
+      return res.json({ ok: false, alias, name, error: `container "${name}" not found on ${alias}` })
+    }
+    return res.json({ ok: false, alias, name, error: r.error, stderr: (r.stderr || '').slice(0, 500) })
+  }
+  let logs = r.stdout || ''
+  if (logs.length > LOG_RESPONSE_CAP_BYTES) {
+    logs = logs.slice(0, LOG_RESPONSE_CAP_BYTES) + `\n\n… [truncated at ${LOG_RESPONSE_CAP_BYTES / 1024} KB]`
+  }
+  res.json({
+    ok: true,
+    alias,
+    name,
+    lines: requested,
+    fetchedAt: Date.now(),
+    logs,
+  })
+})
+
 app.use(express.static(resolve(__dirname, 'public')))
 
 app.listen(PORT, () => {
