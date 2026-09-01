@@ -310,7 +310,7 @@ function onEscClose(e) { if (e.key === 'Escape') closeModal() }
 function openModal({ title, sub, bodyHtml, footerHtml = '', wide = false }) {
   ACTIVE_MODAL_BG.className = 'modal-bg'
   ACTIVE_MODAL_BG.innerHTML = `
-    <div class="modal ${wide ? 'wide' : ''}" onclick="event.stopPropagation()">
+    <div class="modal ${wide ? 'wide' : ''}">
       <div class="mh">
         <div>
           <h2>${escapeHtml(title)}</h2>
@@ -322,7 +322,18 @@ function openModal({ title, sub, bodyHtml, footerHtml = '', wide = false }) {
       ${footerHtml ? `<div class="mf">${footerHtml}</div>` : ''}
     </div>
   `
-  ACTIVE_MODAL_BG.addEventListener('click', closeModal)
+  // Click on the backdrop (outside the .modal box) closes the modal.
+  // Click INSIDE the .modal box is ignored — those clicks bubble up to
+  // document and either hit the data-action delegation below (which
+  // fires openLogsModal etc.) or are no-ops. Earlier revisions used
+  // onclick="event.stopPropagation()" on the .modal div to keep inner
+  // clicks from closing the modal, but that also broke the data-action
+  // delegation: clicks on container rows never reached document. The
+  // current handler below discriminates by target — clicking the .modal
+  // box itself does NOT close, only the backdrop does.
+  ACTIVE_MODAL_BG.addEventListener('click', (e) => {
+    if (e.target === ACTIVE_MODAL_BG) closeModal()
+  })
   ACTIVE_MODAL_BG.querySelector('button.close').addEventListener('click', closeModal)
   document.addEventListener('keydown', onEscClose)
   document.body.appendChild(ACTIVE_MODAL_BG)
