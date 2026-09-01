@@ -106,6 +106,12 @@
     font-size: 11px; color: var(--label-3); font-family: var(--mono);
     display: flex; justify-content: space-between; align-items: center;
   }
+  .modal .mf > span { font-size: 11px; color: var(--label-3); font-family: var(--mono); }
+  .modal .mf .back-btn {
+    background: var(--surface-2); color: var(--label); border: 1px solid var(--border);
+    border-radius: 6px; padding: 4px 10px; font: inherit; cursor: pointer;
+  }
+  .modal .mf .back-btn:hover { background: var(--border); color: var(--acc); }
   .container-row {
     display: grid; grid-template-columns: 24px 1fr 1fr auto; gap: 10px;
     align-items: center; padding: 8px 10px; border-radius: 8px;
@@ -300,12 +306,50 @@ setInterval(tick, POLL_MS)
 // matches the rest of the dashboard's vanilla style.
 
 const ACTIVE_MODAL_BG = document.createElement('div') // reused element for layering
+// Modal history stack: when openLogsModal() is called from openContainersModal(),
+// the containers modal is pushed here first so Backspace / "←" can pop back
+// to it instead of forcing the user to close the modal and reopen it.
+// Each entry is { refresh: () => Promise<void> } — calling refresh() re-runs
+// the fetch + render for that modal so the user sees up-to-date data when
+// they pop back (otherwise the containers list could be minutes stale).
+const modalStack = []
 
 function closeModal() {
   ACTIVE_MODAL_BG.remove()
   document.removeEventListener('keydown', onEscClose)
 }
-function onEscClose(e) { if (e.key === 'Escape') closeModal() }
+
+function popModal() {
+  // Close the current modal and re-open the one below it, if any.
+  if (!modalStack.length) {
+    closeModal()
+    return
+  }
+  const previous = modalStack.pop()
+  closeModal()
+  // refresh() is async (it does a fetch) but we don't await — the open
+  // happens immediately with the cached body, refresh overlays it.
+  if (previous && typeof previous.refresh === 'function') {
+    previous.refresh()
+  }
+}
+
+function onEscClose(e) {
+  if (e.key === 'Escape') {
+    e.preventDefault()
+    closeModal()
+  } else if (e.key === 'Backspace' && modalStack.length > 0) {
+    // Backspace pops one level of modal history. Disabled at the top
+    // level so it doesn't accidentally close the dashboard.
+    // Don't interfere with text editing — there's no input/textarea in
+    // our modals today, but guard anyway in case we add one later.
+    const t = e.target
+    const tag = t && t.tagName
+    if (tag === 'INPUT' || tag === 'TEXTAREA' || (t && t.isContentEditable)) return
+    e.preventDefault()
+    popModal()
+  }
+}
 
 function openModal({ title, sub, bodyHtml, footerHtml = '', wide = false }) {
   ACTIVE_MODAL_BG.className = 'modal-bg'
@@ -432,6 +476,13 @@ async function openContainersModal(alias) {
 }
 
 async function openLogsModal(alias, name) {
+  // Push the previous (containers) modal onto the history stack so
+  // Backspace / "←" can pop back. The refresh callback re-fetches the
+  // list so the user sees up-to-date state when they return.
+  // We snapshot the alias/name here so the closure stays correct even
+  // if the user clicks Backspace twice in a row.
+  modalStack.push({ refresh: () => openContainersModal(alias) })
+
   openModal({
     title: `logs · ${name}`,
     sub: `last 10 lines · ${alias}`,
@@ -465,7 +516,10 @@ async function openLogsModal(alias, name) {
     title: `logs · ${name}`,
     sub: `last ${data.lines} lines · ${alias} · fetched ${fmtAgo(data.fetchedAt)}`,
     bodyHtml: body,
-    footerHtml: `<span>tail -n ${data.lines}</span><span>esc / click outside to close</span>`,
+    // The back button sits in the footer (left side). It pops one level
+    // of modal history — the user ends up back at the containers
+    // modal with up-to-date data. Same behavior as Backspace.
+    footerHtml: `<button class="back-btn" data-action="modal-back">← containers</button><span>tail -n ${data.lines} · esc to close · backspace to go back</span>`,
     wide: true,
   })
 }
@@ -485,6 +539,7 @@ document.addEventListener('click', (e) => {
   const alias = target.dataset.alias
   if (action === 'containers') openContainersModal(alias)
   else if (action === 'logs') openLogsModal(alias, target.dataset.name)
+  else if (action === 'modal-back') popModal()
 })
 </script>
 </body>
