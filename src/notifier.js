@@ -37,7 +37,7 @@ const BOT_TOKEN = process.env.ALERT_TELEGRAM_BOT_TOKEN || ''
 const CHAT_ID = process.env.ALERT_TELEGRAM_CHAT_ID || ''
 const DISK_THRESHOLD = +(process.env.ALERT_DISK_THRESHOLD || 85)
 const COOLDOWN_MIN = +(process.env.ALERT_COOLDOWN_MIN || 60)
-const STATE_FILE = process.env.ALERT_STATE_FILE || resolve(__dirname, 'alert-state.json')
+const STATE_FILE = process.env.ALERT_STATE_FILE || resolve(process.env.ALERT_DATA_DIR || '/data', 'alert-state.json')
 
 // Cooldown log: { "disk:server-17:/": lastSentTs, "server:server-11:down": lastSentTs }
 let lastSent = {}

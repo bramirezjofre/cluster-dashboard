@@ -17,10 +17,11 @@
 // a flat file you have to clean up).
 
 import express from 'express'
-import { readFileSync, existsSync } from 'node:fs'
+import { readFileSync, existsSync, mkdirSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { Client } from 'ssh2'
 import { fileURLToPath } from 'node:url'
+import Database from 'better-sqlite3'
 import { check as checkAlerts } from './notifier.js'
 
 // __dirname equivalent for ESM. fileURLToPath(import.meta.url) gives the
@@ -46,6 +47,60 @@ const SERVERS = (process.env.CLUSTER_SERVERS || 'server-11,server-17,server-18,s
   .split(',')
   .map(s => s.trim())
   .filter(Boolean)
+
+// Long-term history lives in SQLite. Default path is inside the
+// `cluster-dashboard-data` Docker volume mounted at /data so a container
+// recreate doesn't wipe it. Retention is configurable via
+// HISTORY_DAYS (default 30). PRAGMA journal_mode=WAL makes concurrent
+// reads from the API endpoint safe with the writer from pollAll().
+const DATA_DIR = process.env.ALERT_DATA_DIR || '/data'
+const DB_PATH = process.env.DASHBOARD_DB || resolve(DATA_DIR, 'history.db')
+const HISTORY_DAYS = +(process.env.HISTORY_DAYS || 30)
+
+// /data is created and chowned to the daemon user by entrypoint.sh at
+// container start (Docker creates the volume root-owned by default).
+// Defensive mkdir here in case the daemon is ever run outside Docker
+// (e.g. local dev) where there's no entrypoint.
+try { mkdirSync(DATA_DIR, { recursive: true }) } catch (e) { /* */ }
+
+const db = new Database(DB_PATH)
+db.pragma('journal_mode = WAL')
+db.pragma('synchronous = NORMAL')
+db.exec(`
+  CREATE TABLE IF NOT EXISTS samples (
+    alias TEXT NOT NULL,
+    ts INTEGER NOT NULL,
+    cpu REAL, mem_pct REAL, mem_used_mb INTEGER, mem_total_mb INTEGER,
+    load1 REAL, net_rx_kbps REAL, net_tx_kbps REAL,
+    containers INTEGER, hostname TEXT,
+    PRIMARY KEY (alias, ts)
+  ) WITHOUT ROWID;
+  CREATE INDEX IF NOT EXISTS idx_samples_alias_ts ON samples(alias, ts);
+
+  CREATE TABLE IF NOT EXISTS container_snapshots (
+    alias TEXT NOT NULL,
+    ts INTEGER NOT NULL,
+    payload TEXT NOT NULL,
+    PRIMARY KEY (alias, ts)
+  ) WITHOUT ROWID;
+`)
+const insertSample = db.prepare(`
+  INSERT OR REPLACE INTO samples
+    (alias, ts, cpu, mem_pct, mem_used_mb, mem_total_mb, load1, net_rx_kbps, net_tx_kbps, containers, hostname)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+`)
+const insertContainerSnapshot = db.prepare(`
+  INSERT OR REPLACE INTO container_snapshots (alias, ts, payload) VALUES (?, ?, ?)
+`)
+// Runs once on startup and then after every poll. Trims anything older
+// than HISTORY_DAYS so the file doesn't grow unbounded.
+function pruneOldSamples() {
+  const cutoff = Date.now() - HISTORY_DAYS * 24 * 60 * 60 * 1000
+  db.prepare('DELETE FROM samples WHERE ts < ?').run(cutoff)
+  db.prepare('DELETE FROM container_snapshots WHERE ts < ?').run(cutoff)
+}
+pruneOldSamples()
+setInterval(pruneOldSamples, 60 * 60 * 1000)
 
 // --- ring buffer for time series --------------------------------------------
 //
@@ -329,6 +384,15 @@ async function pollAll() {
       ringPush(hist.load1, load1)
       ringPush(hist.net_rx, net_rx)
       ringPush(hist.net_tx, net_tx)
+      // Persist to SQLite for long-term history (survives restarts).
+      // Worst-case disk growth: 5 servers × 1 sample/30s × ~80 bytes/row
+      // × 30 days = ~3.5 MB. Trimming at HISTORY_DAYS caps it.
+      insertSample.run(
+        r.alias, sample.ts,
+        sample.cpu, sample.memPct, sample.memUsedMB, sample.memTotalMB,
+        sample.load1, sample.net_rx_kbps, sample.net_tx_kbps,
+        sample.containers, sample.hostname
+      )
       // Derive a per-sample kbps from the delta vs the previous sample, so the
       // dashboard shows throughput rather than a monotonically-growing counter.
       const prevNet = state.history[r.alias].net_rx.samples
@@ -379,6 +443,30 @@ app.get('/api/cluster/status', (_req, res) => {
   })
 })
 app.get('/api/health', (_req, res) => res.json({ ok: true, uptime: process.uptime() }))
+
+// Long-term history query. Returns rows from SQLite for the given alias
+// in a time window. Used by the dashboard when the user wants to see
+// more than the in-memory ring buffer (which holds only the last 120
+// samples = 1 hour). Defaults to "last 24 hours" when no window given.
+// Caps response at 5000 rows so a wide window doesn't OOM the server.
+app.get('/api/cluster/history', (req, res) => {
+  const alias = String(req.query.alias || '')
+  if (!alias) return res.status(400).json({ ok: false, error: 'alias required' })
+  if (!SERVERS.includes(alias)) return res.status(404).json({ ok: false, error: `unknown server ${alias}` })
+  const now = Date.now()
+  const to = Math.max(0, Math.min(now, +(req.query.to || now)))
+  const from = Math.max(0, Math.min(to, +(req.query.from || (to - 24 * 60 * 60 * 1000))))
+  const limit = Math.max(1, Math.min(5000, +(req.query.limit || 5000)))
+  const rows = db.prepare(`
+    SELECT ts, cpu, mem_pct, mem_used_mb, mem_total_mb, load1,
+           net_rx_kbps, net_tx_kbps, containers, hostname
+    FROM samples
+    WHERE alias = ? AND ts BETWEEN ? AND ?
+    ORDER BY ts ASC
+    LIMIT ?
+  `).all(alias, from, to, limit)
+  res.json({ ok: true, alias, from, to, count: rows.length, samples: rows })
+})
 
 // --- docker container inspection --------------------------------------------
 //

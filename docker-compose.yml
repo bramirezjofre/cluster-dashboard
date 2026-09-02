@@ -50,7 +50,17 @@ services:
       # The .env file holds secrets (telegram bot token, chat id). Compose
       # substitutes ${ALERT_*} from it. Not in the image, not in git.
       - ./.env:/app/.env:ro
+      # Persistent storage: SQLite DB (history) + alert-state.json (cooldowns).
+      # Both live in the same named volume so a container recreate doesn't
+      # wipe long-term history or reset alert cooldowns/fail counters.
+      - cluster-dashboard-data:/data
     # No healthcheck yet — the daemon listens on PORT but doesn't expose
     # a readiness probe that distinguishes "polling" from "crashed". Add a
     # GET /api/health that returns 200 only after the first successful poll
     # if you wire healthcheck to compose's depends_on: condition: healthy.
+
+volumes:
+  cluster-dashboard-data:
+    # Named volume for SQLite history + alert state. docker compose creates
+    # it on first up; subsequent recreates of the service re-attach the
+    # same backing directory so data survives.

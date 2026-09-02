@@ -9,7 +9,8 @@
   },
   "dependencies": {
     "express": "^4.21.2",
-    "ssh2": "^1.16.0"
+    "ssh2": "^1.16.0",
+    "better-sqlite3": "^11.5.0"
   },
   "license": "AGPL-3.0-or-later"
 }
