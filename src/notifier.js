@@ -242,11 +242,16 @@ export async function check(state) {
     // clean.
     if (!srv.ok) {
       const count = bumpFails(alias, false)
-      // Only fire when the counter just crossed the threshold. This
-      // avoids re-firing every poll while the server stays down — the
-      // 60-minute cooldown on the `server:<alias>:down` key handles
-      // re-alerting if the server keeps failing past that.
-      if (count === CONSECUTIVE_FAILS_THRESHOLD && prevSrv.ok === true && !inCooldown(`server:${alias}:down`)) {
+      // Fire once the counter has reached the threshold and we haven't
+      // already alerted within the cooldown. The earlier condition
+      // (`count === THRESHOLD && prevSrv.ok === true`) was too strict:
+      // if the counter was clobbered or the threshold moment was missed
+      // (e.g. a race with the snapshot update), the down alert never
+      // fired even after many consecutive failed polls. Now any poll
+      // that has counter >= threshold and is not in cooldown fires it.
+      // The prevSrv.ok check is removed because inCooldown already
+      // prevents repeat alerts within 60 minutes.
+      if (count >= CONSECUTIVE_FAILS_THRESHOLD && !inCooldown(`server:${alias}:down`)) {
         const fire = { key: `server:${alias}:down`, text: serverAlertMsg(alias, srv.last?.hostname || alias, 'down') }
         fires.push(fire)
         // Optimistically mark so that if Telegram send fails, we still
