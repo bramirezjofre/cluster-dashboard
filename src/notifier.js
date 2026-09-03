@@ -72,6 +72,24 @@ try {
   }
 } catch (e) { failCounters = {} }
 
+// Per-server flag: was a "server down" alert actually sent for this
+// alias since the last time it was confirmed reachable? An "up" alert
+// only fires if this is true — otherwise a transient single-poll failure
+// (e.g. SSH timeout, server load spike) followed by recovery would send
+// "back online" with no preceding "unreachable" message, which is
+// confusing for the operator. Reset to false whenever the server is
+// seen reachable with no active down period.
+//   { "server-11": 1788232000000 }   // ts of the last successful down alert
+let lastDownSent = {}
+try {
+  if (existsSync(STATE_FILE)) {
+    const saved = JSON.parse(readFileSync(STATE_FILE, 'utf8'))
+    if (saved && typeof saved.lastDownSent === 'object' && saved.lastDownSent) {
+      lastDownSent = saved.lastDownSent
+    }
+  }
+} catch (e) { lastDownSent = {} }
+
 function bumpFails(alias, okNow) {
   if (okNow) {
     // Recovered — clear the counter. We do NOT delete the key; we reset
@@ -97,8 +115,16 @@ function persistCounters() {
     let disk = {}
     try { disk = JSON.parse(readFileSync(STATE_FILE, 'utf8')) } catch (e) { disk = {} }
     disk.failCounters = failCounters
+    disk.lastDownSent = lastDownSent
     writeFileSync(STATE_FILE, JSON.stringify(disk))
   } catch (e) { /* */ }
+}
+
+function clearDownSent(alias) {
+  if (lastDownSent[alias]) {
+    delete lastDownSent[alias]
+    persistCounters()
+  }
 }
 
 function inCooldown(key) {
@@ -192,6 +218,8 @@ export async function check(state) {
   }
 
   const fires = []
+  const firesPendingDownMark = []   // aliases whose down alert fired — mark lastDownSent after send
+  const firesPendingUpMark = []     // aliases whose up alert fired — clear lastDownSent after send
   const now = snapshot(state)
 
   for (const [alias, srv] of Object.entries(state.servers)) {
@@ -202,12 +230,16 @@ export async function check(state) {
     // Down: only fire after CONSECUTIVE_FAILS_THRESHOLD consecutive
     // failed polls. A single ssh timeout (network blip, server load
     // spike, daemon busy) shouldn't generate a "server down" alert.
-    // We still update the snapshot in `prev` every poll so the
-    // transition detection works correctly.
+    // When the down alert fires, we set lastDownSent[alias] so the
+    // matching "up" alert is allowed later.
     //
-    // Up: fire on the FIRST successful poll after a down period. No
-    // threshold here — recovery is the easy direction (you want to
-    // know quickly).
+    // Up: fire ONLY if a down alert was actually sent for this alias
+    // since the last successful reachability. Otherwise a transient
+    // single-poll failure + recovery (or a restart that started while
+    // the server was reachable) would emit a confusing "back online"
+    // with no preceding "unreachable" message. Reset lastDownSent
+    // once the recovery alert is sent, so the next down cycle starts
+    // clean.
     if (!srv.ok) {
       const count = bumpFails(alias, false)
       // Only fire when the counter just crossed the threshold. This
@@ -215,14 +247,27 @@ export async function check(state) {
       // 60-minute cooldown on the `server:<alias>:down` key handles
       // re-alerting if the server keeps failing past that.
       if (count === CONSECUTIVE_FAILS_THRESHOLD && prevSrv.ok === true && !inCooldown(`server:${alias}:down`)) {
-        fires.push({ key: `server:${alias}:down`, text: serverAlertMsg(alias, srv.last?.hostname || alias, 'down') })
+        const fire = { key: `server:${alias}:down`, text: serverAlertMsg(alias, srv.last?.hostname || alias, 'down') }
+        fires.push(fire)
+        // Optimistically mark so that if Telegram send fails, we still
+        // remember the down happened (a missing "down" + a matching
+        // "up" is the lesser evil). We could roll this back if send
+        // fails, but that risks a duplicate "down" on retry. Mark-then-
+        // send matches the rest of the notifier's behavior.
+        firesPendingDownMark.push(alias)
       }
     } else {
       bumpFails(alias, true)
       if (prevSrv.ok === false) {
         const key = `server:${alias}:up`
-        if (!inCooldown(key)) {
-          fires.push({ key, text: serverAlertMsg(alias, srv.last?.hostname || alias, 'up') })
+        // Only fire if a down was previously sent for this alias.
+        // Otherwise this is a transient blip (single-poll fail) or a
+        // first-seen-after-restart reachable state — neither warrants
+        // a notification.
+        if (lastDownSent[alias] && !inCooldown(key)) {
+          const fire = { key, text: serverAlertMsg(alias, srv.last?.hostname || alias, 'up') }
+          fires.push(fire)
+          firesPendingUpMark.push(alias)
         }
       }
     }
@@ -247,6 +292,16 @@ export async function check(state) {
     const r = results[i]
     if (r.status === 'fulfilled') {
       console.log(`alert: sent ${fires[i].key}`)
+      // After a successful send, update lastDownSent bookkeeping:
+      //   - down alert fired → mark this alias so its matching up can fire
+      //   - up   alert fired → clear this alias so the next cycle starts clean
+      const firedAlias = fires[i].key.split(':')[1]
+      if (firesPendingDownMark.includes(firedAlias)) {
+        lastDownSent[firedAlias] = Date.now()
+        persistCounters()
+      } else if (firesPendingUpMark.includes(firedAlias)) {
+        clearDownSent(firedAlias)
+      }
     } else {
       console.error(`alert: failed ${fires[i].key}: ${r.reason?.message || r.reason}`)
     }
