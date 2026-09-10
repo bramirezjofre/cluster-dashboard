@@ -17,6 +17,9 @@ container itself.
 - Keeps a ring buffer of the last `HISTORY_SAMPLES` samples (default 120
   = 1h at 30s) per metric, per server, in memory
 - Serves the dashboard HTML and a JSON snapshot from `/api/cluster/status`
+- Polls the local LAN via ARP scan and queries configured Pi-hole v6
+  instances for DNS stats (see "LAN monitoring" below). Result is
+  available at `/api/lan/status` and `/api/lan/history`.
 
 ## What it does NOT do
 
@@ -27,6 +30,55 @@ container itself.
   mounted read-only from the host; no keys are baked into the image.
 - It does not persist history to disk. A restart loses the ring buffer;
   that's intentional for a single-host dashboard.
+
+## LAN monitoring
+
+The daemon also tracks what's happening on the local network:
+
+- **ARP scan** of `LAN_SUBNET` (default `192.168.0.0/24`) every
+  `LAN_POLL_INTERVAL_MS` (default 60s). Result is a table of IP + MAC
+  pairs for active hosts, shown in the "Dispositivos LAN" card.
+- **Pi-hole stats** for each instance configured in `.env`. The
+  dashboard calls Pi-hole's v6 API (`/api/auth`, `/api/stats/summary`,
+  `/api/stats/top_clients`) to show total queries, blocked queries,
+  percent blocked, and top clients. Multiple Pi-holes are supported and
+  stats are aggregated.
+
+### Configuring Pi-hole
+
+Pi-hole hosts and passwords live in `.env` (gitignored). See
+`.env.example` for the format. The container's `entrypoint.sh` reads
+them at startup and assembles the `PIHOLE_HOSTS` env var, so the
+password never appears in `docker-compose.yml` or in `docker compose
+config` output. Up to 5 instances are wired by default; extend
+`entrypoint.sh` if you need more.
+
+```ini
+# .env
+PIHOLE_HOST_1=192.168.0.11:8080
+PIHOLE_PASSWORD_1=<password>
+PIHOLE_HOST_2=192.168.0.18:80
+PIHOLE_PASSWORD_2=<password>
+```
+
+### Endpoints
+
+- `GET /api/lan/status` — current snapshot: `{ arp: { ts, devices[] },
+  pihole: { "<host>:<port>": { ts, ok, totalQueries, blockedQueries,
+  percentBlocked, topClients: [{ip, name, count}] } } }`
+- `GET /api/lan/history?source=arp|pihole:<host>:<port>&from=<ms>&to=<ms>&limit=<n>`
+  — historical samples from SQLite (retention: `HISTORY_DAYS`, default 30).
+
+### Caveats
+
+- ARP scan only sees devices that respond to ping or have an existing
+  ARP entry. A powered-off device disappears from the list until it
+  comes back. The Samsung S20fe this dashboard runs on is a typical
+  example — it appears only when awake.
+- Pi-hole sees DNS queries, not raw traffic. Total bytes transferred
+  per device is not available without per-host network taps (which
+  require either a managed switch with port mirroring or a router that
+  exports NetFlow/sFlow, neither of which is in scope here).
 
 ## Layout
 
