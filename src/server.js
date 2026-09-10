@@ -20,8 +20,9 @@ import express from 'express'
 import { readFileSync, existsSync, mkdirSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { Client } from 'ssh2'
-import { fileURLToPath } from 'node:url'
 import Database from 'better-sqlite3'
+import { pollPihole } from './pihole.js'
+import { arpScan } from './arp.js'
 import { check as checkAlerts } from './notifier.js'
 
 // __dirname equivalent for ESM. fileURLToPath(import.meta.url) gives the
@@ -47,6 +48,22 @@ const SERVERS = (process.env.CLUSTER_SERVERS || 'server-11,server-17,server-18,s
   .split(',')
   .map(s => s.trim())
   .filter(Boolean)
+
+// --- LAN monitoring config -------------------------------------------------
+// PIHOLE_HOSTS format: "host:port:password,host:port:password"
+// (assembled by entrypoint.sh from PIHOLE_HOST_N + PIHOLE_PASSWORD_N to
+// keep secrets out of docker-compose.yml.)
+const LAN_SUBNET = process.env.LAN_SUBNET || '192.168.0.0/24'
+const LAN_POLL_INTERVAL_MS = +(process.env.LAN_POLL_INTERVAL_MS || 60_000)
+const LAN_HISTORY_SAMPLES = +(process.env.LAN_HISTORY_SAMPLES || 720)
+const PIHOLE_HOSTS = (process.env.PIHOLE_HOSTS || '')
+  .split(',')
+  .map(s => s.trim())
+  .filter(Boolean)
+  .map(spec => {
+    const [host, port, password] = spec.split(':')
+    return { host, port: +(port || 80), password: password || '' }
+  })
 
 // Long-term history lives in SQLite. Default path is inside the
 // `cluster-dashboard-data` Docker volume mounted at /data so a container
