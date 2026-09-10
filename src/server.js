@@ -517,6 +517,25 @@ app.get('/api/cluster/status', (_req, res) => {
 })
 app.get('/api/health', (_req, res) => res.json({ ok: true, uptime: process.uptime() }))
 
+// LAN monitoring endpoints.
+app.get('/api/lan/status', (_req, res) => res.json(lanState))
+
+app.get('/api/lan/history', (req, res) => {
+  const source = String(req.query.source || 'arp')
+  const now = Date.now()
+  const to = Math.max(0, Math.min(now, +(req.query.to || now)))
+  const from = Math.max(0, Math.min(to, +(req.query.from || (to - 24 * 60 * 60 * 1000))))
+  const limit = Math.max(1, Math.min(5000, +(req.query.limit || 5000)))
+  const rows = db.prepare(
+    `SELECT ts, payload FROM lan_samples WHERE source = ? AND ts >= ? AND ts <= ? ORDER BY ts ASC LIMIT ?`
+  ).all(source, from, to, limit)
+  res.json({
+    source,
+    range: { from, to },
+    rows: rows.map(r => ({ ts: r.ts, payload: JSON.parse(r.payload) })),
+  })
+})
+
 // Long-term history query. Returns rows from SQLite for the given alias
 // in a time window. Used by the dashboard when the user wants to see
 // more than the in-memory ring buffer (which holds only the last 120
