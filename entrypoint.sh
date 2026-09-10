@@ -23,13 +23,15 @@ BUILD_GID="${BUILD_GID:-1000}"
 # in docker-compose.yml. Each pair PIHOLE_HOST_N / PIHOLE_PASSWORD_N is
 # optional; only defined pairs are assembled. Result format:
 #   "host:port:password,host:port:password"
+#
+# Uses eval to read PIHOLE_HOST_N / PIHOLE_PASSWORD_N. POSIX sh doesn't
+# support ${!var} indirect expansion, but this script also runs on
+# Alpine's busybox ash where bashisms would fail. eval works on both.
 if [ -z "${PIHOLE_HOSTS:-}" ]; then
   PIHOLE_HOSTS=""
   for n in 1 2 3 4 5; do
-    hvar="PIHOLE_HOST_${n}"
-    pvar="PIHOLE_PASSWORD_${n}"
-    h="${!hvar:-}"
-    p="${!pvar:-}"
+    eval "h=\${PIHOLE_HOST_${n}:-}"
+    eval "p=\${PIHOLE_PASSWORD_${n}:-}"
     if [ -n "$h" ] && [ -n "$p" ]; then
       if [ -z "$PIHOLE_HOSTS" ]; then
         PIHOLE_HOSTS="${h}:${p}"
