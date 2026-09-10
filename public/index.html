@@ -124,6 +124,16 @@
   .container-row .name { color: var(--label); font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .container-row .image { color: var(--label-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .container-row .status { color: var(--label-2); font-size: 11px; }
+
+  /* LAN monitoring cards */
+  .lan-card { margin-top: 16px; cursor: default; }
+  .lan-card:hover { border-color: var(--border); }
+  .lan-card .muted { color: var(--label-2); font-size: 12px; margin: 4px 0 8px 0; }
+  .lan-table { width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 12px; }
+  .lan-table td { padding: 4px 8px; border-bottom: 1px solid var(--border); }
+  .lan-table td:nth-child(2) { color: var(--label-2); }
+  .lan-table td.num { text-align: right; color: var(--acc); }
+  .lan-table tr:last-child td { border-bottom: none; }
   .log-box {
     background: #0a0c10; border: 1px solid var(--border); border-radius: 8px;
     padding: 12px 14px; font-family: var(--mono); font-size: 12px; line-height: 1.55;
@@ -147,6 +157,22 @@
 <main id="cards">
   <div class="loading">loading…</div>
 </main>
+
+<!-- LAN monitoring — populated by refreshLan() in the script below.
+     Kept outside #cards so the card click delegation doesn't treat them
+     as server cards (they don't open a containers modal). -->
+<section class="card lan-card" id="lan-devices">
+  <div class="head"><span class="name">Dispositivos LAN</span><span class="status" id="lan-count-badge">—</span></div>
+  <p class="muted">Último ARP scan: <span id="lan-ts">—</span></p>
+  <div id="lan-list"><em>cargando…</em></div>
+</section>
+
+<section class="card lan-card" id="lan-pihole">
+  <div class="head"><span class="name">Tráfico DNS (Pi-hole)</span><span class="status" id="ph-status-badge">—</span></div>
+  <p class="muted" id="ph-summary">—</p>
+  <p class="muted" id="ph-clients-summary">—</p>
+  <div id="ph-clients"><em>cargando…</em></div>
+</section>
 <script>
 const POLL_MS = 30_000
 const CARDS = document.getElementById('cards')
@@ -295,6 +321,106 @@ async function tick() {
 
 tick()
 setInterval(tick, POLL_MS)
+
+// --- LAN monitoring ---------------------------------------------------------
+// Polls /api/lan/status and renders the two cards outside #cards. Decoupled
+// from the 30s server poll because LAN data changes more slowly and the
+// ARP scan is heavy enough that 60s is the right cadence.
+
+const LAN_POLL_MS = 60_000
+
+function fmtTime(ts) {
+  if (!ts) return '—'
+  return new Date(ts).toLocaleTimeString()
+}
+function fmtNum(n) {
+  return (n || 0).toLocaleString('es-CL')
+}
+function escHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+  }[c]))
+}
+
+async function refreshLan() {
+  try {
+    const r = await fetch('/api/lan/status')
+    if (!r.ok) throw new Error('status ' + r.status)
+    const data = await r.json()
+    // ARP
+    const arp = data.arp || { devices: [] }
+    document.getElementById('lan-ts').textContent = fmtTime(arp.ts)
+    document.getElementById('lan-count-badge').textContent = (arp.devices || []).length + ' activos'
+    const list = document.getElementById('lan-list')
+    if (!arp.devices || !arp.devices.length) {
+      list.innerHTML = '<em>sin dispositivos detectados</em>'
+    } else {
+      list.innerHTML = '<table class="lan-table">' +
+        arp.devices.slice(0, 40).map(d =>
+          `<tr><td>${escHtml(d.ip)}</td><td>${escHtml(d.mac || '—')}</td></tr>`
+        ).join('') + '</table>'
+    }
+    // Pi-hole (aggregate across all configured instances)
+    const ph = data.pihole || {}
+    const keys = Object.keys(ph)
+    let totalQ = 0, blocked = 0, okCount = 0, failCount = 0
+    keys.forEach(k => {
+      const e = ph[k]
+      if (e && e.ok) {
+        totalQ += (e.totalQueries || 0)
+        blocked += (e.blockedQueries || 0)
+        okCount++
+      } else if (e) {
+        failCount++
+      }
+    })
+    const pct = totalQ > 0 ? ((blocked / totalQ) * 100).toFixed(1) : '0.0'
+    const badge = document.getElementById('ph-status-badge')
+    if (failCount === 0 && okCount > 0) {
+      badge.textContent = okCount + ' OK'
+      badge.className = 'status ok'
+    } else if (okCount > 0 && failCount > 0) {
+      badge.textContent = okCount + ' OK / ' + failCount + ' fail'
+      badge.className = 'status bad'
+    } else if (failCount > 0) {
+      badge.textContent = failCount + ' fail'
+      badge.className = 'status bad'
+    } else {
+      badge.textContent = 'sin datos'
+      badge.className = 'status'
+    }
+    document.getElementById('ph-summary').textContent =
+      keys.length + ' Pi-hole' + (keys.length === 1 ? '' : 's') +
+      ' · ' + fmtNum(totalQ) + ' queries totales · ' +
+      fmtNum(blocked) + ' bloqueadas (' + pct + '%)'
+    // Top clients aggregated
+    const clientMap = new Map()
+    keys.forEach(k => {
+      const e = ph[k]
+      if (!e || !e.ok) return
+      ;(e.topClients || []).forEach(c => {
+        clientMap.set(c.ip, (clientMap.get(c.ip) || 0) + (c.count || 0))
+      })
+    })
+    const top = Array.from(clientMap.entries()).sort((a, b) => b[1] - a[1]).slice(0, 15)
+    document.getElementById('ph-clients-summary').textContent =
+      'Top ' + top.length + ' clientes (suma de queries DNS)'
+    const cl = document.getElementById('ph-clients')
+    if (!top.length) {
+      cl.innerHTML = '<em>sin datos</em>'
+    } else {
+      cl.innerHTML = '<table class="lan-table">' +
+        top.map(([ip, count]) =>
+          `<tr><td>${escHtml(ip)}</td><td class="num">${fmtNum(count)}</td></tr>`
+        ).join('') + '</table>'
+    }
+  } catch (e) {
+    console.warn('refreshLan failed:', e)
+  }
+}
+
+refreshLan()
+setInterval(refreshLan, LAN_POLL_MS)
 
 // --- docker container inspector --------------------------------------------
 //
