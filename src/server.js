@@ -457,6 +457,50 @@ pollAll = async function() {
 setInterval(pollAll, POLL_INTERVAL_MS)
 pollAll()
 
+// --- LAN monitoring ----------------------------------------------------------
+//
+// State is a snapshot used by /api/lan/status. Each Pi-hole instance gets a
+// key like "192.168.0.11:8080". ARP results are stored under .arp.
+// All writes go through insertLanSample so the SQLite table mirrors what's
+// shown to the user. Errors are caught here so a misbehaving Pi-hole never
+// breaks the rest of the daemon.
+
+const lanState = {
+  arp: { ts: 0, devices: [] },
+  pihole: {},
+  lastError: null,
+}
+
+async function pollLan() {
+  const ts = Date.now()
+  // ARP scan
+  try {
+    const devices = await arpScan({ subnet: LAN_SUBNET })
+    lanState.arp = { ts, devices }
+    insertLanSample.run('arp', ts, JSON.stringify(devices))
+  } catch (e) {
+    lanState.lastError = `arp: ${e.message || String(e)}`
+    console.error('[lan] arp scan failed:', e.message || e)
+  }
+  // Pi-hole instances in parallel
+  await Promise.all(PIHOLE_HOSTS.map(async (inst) => {
+    const key = `${inst.host}:${inst.port}`
+    try {
+      const r = await pollPihole(inst)
+      lanState.pihole[key] = { ts, ...r }
+      insertLanSample.run(`pihole:${key}`, ts, JSON.stringify(r))
+    } catch (e) {
+      lanState.pihole[key] = { ts, ok: false, error: e.message || String(e) }
+      console.error(`[lan] pihole ${key} failed:`, e.message || e)
+    }
+  }))
+}
+
+if (PIHOLE_HOSTS.length > 0 || process.env.LAN_SUBNET) {
+  setInterval(pollLan, LAN_POLL_INTERVAL_MS).unref()
+  pollLan()
+}
+
 // --- http --------------------------------------------------------------------
 
 const app = express()
