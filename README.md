@@ -53,12 +53,18 @@ password never appears in `docker-compose.yml` or in `docker compose
 config` output. Up to 5 instances are wired by default; extend
 `entrypoint.sh` if you need more.
 
+**Escape warning.** `docker compose` interprets `$$` in `.env` as a
+single escape character and drops one. If your Pi-hole password
+contains literal `$$` (e.g. `Pa$$w0rd`), write `$$$$` in `.env` so
+the container receives the right value. `.env.example` shows the
+working form.
+
 ```ini
 # .env
 PIHOLE_HOST_1=192.168.0.11:8080
-PIHOLE_PASSWORD_1=<password>
+PIHOLE_PASSWORD_1=<password with $$ escaped as $$$$>
 PIHOLE_HOST_2=192.168.0.18:80
-PIHOLE_PASSWORD_2=<password>
+PIHOLE_PASSWORD_2=<password with $$ escaped as $$$$>
 ```
 
 ### Endpoints
@@ -79,6 +85,32 @@ PIHOLE_PASSWORD_2=<password>
   per device is not available without per-host network taps (which
   require either a managed switch with port mirroring or a router that
   exports NetFlow/sFlow, neither of which is in scope here).
+- The container runs with `network_mode: host` so the ARP scan can
+  reach the LAN. Without it the container only sees its own docker
+  bridge subnet (172.x).
+
+## Tests
+
+A standalone test image (`Dockerfile.test`) runs the unit tests on
+Node 22-alpine, which avoids polluting the host's `node_modules` and
+sidesteps the better-sqlite3 native build issue some Node versions
+have:
+
+```bash
+docker build -f Dockerfile.test -t cluster-dashboard-test .
+docker run --rm cluster-dashboard-test
+```
+
+Or via Compose, using the `test` profile so `docker compose up` doesn't
+start it:
+
+```bash
+docker compose run --rm test
+```
+
+The test suite currently covers `src/pihole.js` (login flow, 401
+relogin, error paths) and `src/arp.js` (ARP cache parsing). Tests use
+`node --test`, no extra dependencies.
 
 ## Layout
 
