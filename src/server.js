@@ -100,14 +100,25 @@ db.exec(`
     payload TEXT NOT NULL,
     PRIMARY KEY (alias, ts)
   ) WITHOUT ROWID;
+
+  CREATE TABLE IF NOT EXISTS lan_samples (
+    ts INTEGER NOT NULL,
+    source TEXT NOT NULL,            -- 'arp' | 'pihole:<host>:<port>'
+    payload TEXT NOT NULL,
+    PRIMARY KEY (source, ts)
+  ) WITHOUT ROWID;
+  CREATE INDEX IF NOT EXISTS idx_lan_ts ON lan_samples(ts);
 `)
 const insertSample = db.prepare(`
   INSERT OR REPLACE INTO samples
     (alias, ts, cpu, mem_pct, mem_used_mb, mem_total_mb, load1, net_rx_kbps, net_tx_kbps, containers, hostname)
-  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `)
 const insertContainerSnapshot = db.prepare(`
   INSERT OR REPLACE INTO container_snapshots (alias, ts, payload) VALUES (?, ?, ?)
+`)
+const insertLanSample = db.prepare(`
+  INSERT OR REPLACE INTO lan_samples (source, ts, payload) VALUES (?, ?, ?)
 `)
 // Runs once on startup and then after every poll. Trims anything older
 // than HISTORY_DAYS so the file doesn't grow unbounded.
@@ -115,6 +126,7 @@ function pruneOldSamples() {
   const cutoff = Date.now() - HISTORY_DAYS * 24 * 60 * 60 * 1000
   db.prepare('DELETE FROM samples WHERE ts < ?').run(cutoff)
   db.prepare('DELETE FROM container_snapshots WHERE ts < ?').run(cutoff)
+  db.prepare('DELETE FROM lan_samples WHERE ts < ?').run(cutoff)
 }
 pruneOldSamples()
 setInterval(pruneOldSamples, 60 * 60 * 1000)
