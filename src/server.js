@@ -19,6 +19,7 @@
 import express from 'express'
 import { readFileSync, existsSync, mkdirSync } from 'node:fs'
 import { resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { Client } from 'ssh2'
 import Database from 'better-sqlite3'
 import { pollPihole } from './pihole.js'

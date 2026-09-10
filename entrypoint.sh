@@ -19,6 +19,28 @@ set -e
 BUILD_UID="${BUILD_UID:-1000}"
 BUILD_GID="${BUILD_GID:-1000}"
 
+# Compose PIHOLE_HOSTS from individual entries so passwords never appear
+# in docker-compose.yml. Each pair PIHOLE_HOST_N / PIHOLE_PASSWORD_N is
+# optional; only defined pairs are assembled. Result format:
+#   "host:port:password,host:port:password"
+if [ -z "${PIHOLE_HOSTS:-}" ]; then
+  PIHOLE_HOSTS=""
+  for n in 1 2 3 4 5; do
+    hvar="PIHOLE_HOST_${n}"
+    pvar="PIHOLE_PASSWORD_${n}"
+    h="${!hvar:-}"
+    p="${!pvar:-}"
+    if [ -n "$h" ] && [ -n "$p" ]; then
+      if [ -z "$PIHOLE_HOSTS" ]; then
+        PIHOLE_HOSTS="${h}:${p}"
+      else
+        PIHOLE_HOSTS="${PIHOLE_HOSTS},${h}:${p}"
+      fi
+    fi
+  done
+  export PIHOLE_HOSTS
+fi
+
 echo "entrypoint: chown /data to ${BUILD_UID}:${BUILD_GID}"
 chown -R "${BUILD_UID}:${BUILD_GID}" /data || {
   echo "entrypoint: chown failed (continuing — maybe volume already correct)"
