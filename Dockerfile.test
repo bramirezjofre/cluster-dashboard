@@ -1,0 +1,31 @@
+# cluster-dashboard — test image.
+#
+# Standalone image that runs the unit tests in src/*.test.js with
+# `node --test`. Doesn't need better-sqlite3 or any other runtime deps
+# (the test files only import the pihole.js and arp.js modules, which
+# are pure ESM with no native bindings).
+#
+# Build:    docker build -f Dockerfile.test -t cluster-dashboard-test .
+# Run:      docker run --rm cluster-dashboard-test
+# Or once:  docker run --rm cluster-dashboard-test && echo OK
+#
+# Why this exists: the host has Node 26 globally, but better-sqlite3
+# (a runtime dep, not needed for tests) only ships prebuilds for Node
+# 22 LTS and refuses to build from source on Node 26. The test suite
+# is independent of better-sqlite3, so we use Node 22 here and skip
+# the runtime deps.
+
+FROM node:22-alpine
+
+WORKDIR /app
+
+# Only the test files and the modules they cover are needed.
+# No package.json, no npm install, no native deps.
+COPY src/pihole.js      ./src/pihole.js
+COPY src/pihole.test.js ./src/pihole.test.js
+COPY src/arp.js         ./src/arp.js
+COPY src/arp.test.js    ./src/arp.test.js
+
+# Run all tests under src/. `node --test` discovers *.test.js by itself.
+# --test-reporter=spec gives readable output in `docker run`.
+CMD ["node", "--test", "--test-reporter=spec", "src/pihole.test.js", "src/arp.test.js"]

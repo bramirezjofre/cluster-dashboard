@@ -32,6 +32,11 @@ services:
       # trust. If you want to expose it beyond the LAN, put it behind
       # Nginx Proxy Manager with auth — see README.
       - "9090:9090"
+    # Run in the host network namespace so ARP scans reach the LAN that
+    # the host is on (otherwise the container only sees its own docker
+    # bridge subnet). Port mapping above still works because we bind
+    # 9090 directly on the host.
+    network_mode: host
     environment:
       PORT: "9090"
       POLL_INTERVAL_MS: "30000"
@@ -75,6 +80,17 @@ services:
     # a readiness probe that distinguishes "polling" from "crashed". Add a
     # GET /api/health that returns 200 only after the first successful poll
     # if you wire healthcheck to compose's depends_on: condition: healthy.
+
+  # Standalone test runner — builds from Dockerfile.test (no runtime deps,
+  # just the test files) and exits with the test exit code. Useful for CI
+  # or running tests without polluting the host's node_modules.
+  # Run:  docker compose run --rm test
+  test:
+    build:
+      context: .
+      dockerfile: Dockerfile.test
+    image: cluster-dashboard-test:latest
+    profiles: ["test"]   # not started by `docker compose up`; opt-in
 
 volumes:
   cluster-dashboard-data:
