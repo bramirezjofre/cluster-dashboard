@@ -145,6 +145,61 @@
     color: var(--bad); font-family: var(--mono); font-size: 12px;
     background: var(--surface-2); padding: 10px 12px; border-radius: 8px;
   }
+
+  /* Pi-hole card: prominent numeric stats + donut + legend */
+  .big-stats {
+    display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px;
+    margin: 14px 0 18px 0; padding: 12px 0;
+    border-top: 1px solid var(--border);
+    border-bottom: 1px solid var(--border);
+  }
+  .big-stat { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; min-width: 0; }
+  .big-num {
+    font-family: var(--mono); font-size: 26px; font-weight: 600; line-height: 1.1;
+    color: var(--label); letter-spacing: -.5px; white-space: nowrap;
+  }
+  .big-num.bad { color: var(--bad); }
+  .big-num.warn { color: var(--warn); }
+  .big-l {
+    font-family: var(--mono); font-size: 10px; color: var(--label-3);
+    text-transform: uppercase; letter-spacing: .5px; margin-top: 2px;
+  }
+  .ph-pie-row { display: grid; grid-template-columns: 220px 1fr; gap: 18px; align-items: start; }
+  .ph-pie {
+    position: relative; width: 220px; height: 220px;
+  }
+  .ph-pie-svg { width: 100%; height: 100%; display: block; }
+  .ph-pie-svg path { fill-opacity: .85; transition: fill-opacity .12s ease, transform .12s ease; cursor: default; }
+  .ph-pie-svg path:hover { fill-opacity: 1; transform: translateZ(0) scale(1.02); transform-origin: 110px 110px; }
+  .ph-pie-center {
+    position: absolute; inset: 0;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    pointer-events: none;
+  }
+  .ph-pie-center .big-num { font-size: 22px; }
+  .ph-pie-center .big-l { margin-top: 4px; }
+  .ph-legend {
+    display: flex; flex-direction: column; gap: 4px;
+    max-height: 220px; overflow-y: auto;
+    font-family: var(--mono); font-size: 12px;
+  }
+  .ph-legend-row {
+    display: grid; grid-template-columns: 14px 1fr auto auto;
+    gap: 10px; align-items: center; padding: 3px 0;
+    border-bottom: 1px dashed var(--border);
+  }
+  .ph-legend-row:last-child { border-bottom: none; }
+  .ph-sw {
+    width: 12px; height: 12px; border-radius: 3px; display: inline-block;
+    border: 1px solid rgba(255,255,255,.08);
+  }
+  .ph-ip { color: var(--label); }
+  .ph-q { color: var(--good); font-variant-numeric: tabular-nums; }
+  .ph-p { color: var(--warn); font-variant-numeric: tabular-nums; min-width: 48px; text-align: right; }
+  @media (max-width: 720px) {
+    .big-stats { grid-template-columns: repeat(2, 1fr); }
+    .ph-pie-row { grid-template-columns: 1fr; }
+  }
 </style>
 </head>
 <body>
@@ -169,9 +224,16 @@
 
 <section class="card lan-card" id="lan-pihole">
   <div class="head"><span class="name">Tráfico DNS (Pi-hole)</span><span class="status" id="ph-status-badge">—</span></div>
-  <p class="muted" id="ph-summary">—</p>
-  <p class="muted" id="ph-clients-summary">—</p>
-  <div id="ph-clients"><em>cargando…</em></div>
+  <div class="big-stats" id="ph-big-stats">
+    <div class="big-stat"><div class="big-num" id="ph-total">—</div><div class="big-l">queries totales</div></div>
+    <div class="big-stat"><div class="big-num bad" id="ph-blocked">—</div><div class="big-l">bloqueadas</div></div>
+    <div class="big-stat"><div class="big-num warn" id="ph-pct">—</div><div class="big-l">del total</div></div>
+    <div class="big-stat"><div class="big-num" id="ph-clients-n">—</div><div class="big-l">clientes top</div></div>
+  </div>
+  <div class="ph-pie-row">
+    <div class="ph-pie" id="ph-pie"></div>
+    <div class="ph-legend" id="ph-legend"></div>
+  </div>
 </section>
 <script>
 const POLL_MS = 30_000
@@ -454,11 +516,8 @@ async function refreshLan() {
       badge.textContent = 'sin datos'
       badge.className = 'status'
     }
-    document.getElementById('ph-summary').textContent =
-      keys.length + ' Pi-hole' + (keys.length === 1 ? '' : 's') +
-      ' · ' + fmtNum(totalQ) + ' queries totales · ' +
-      fmtNum(blocked) + ' bloqueadas (' + pct + '%)'
-    // Top clients aggregated
+    // Aggregate client traffic across all Pi-holes (sum if a client
+    // appears in more than one instance, e.g. 127.0.0.1).
     const clientMap = new Map()
     keys.forEach(k => {
       const e = ph[k]
@@ -467,18 +526,20 @@ async function refreshLan() {
         clientMap.set(c.ip, (clientMap.get(c.ip) || 0) + (c.count || 0))
       })
     })
-    const top = Array.from(clientMap.entries()).sort((a, b) => b[1] - a[1]).slice(0, 15)
-    document.getElementById('ph-clients-summary').textContent =
-      'Top ' + top.length + ' clientes (suma de queries DNS)'
-    const cl = document.getElementById('ph-clients')
-    if (!top.length) {
-      cl.innerHTML = '<em>sin datos</em>'
-    } else {
-      cl.innerHTML = '<table class="lan-table">' +
-        top.map(([ip, count]) =>
-          `<tr><td>${escHtml(ip)}</td><td class="num">${fmtNum(count)}</td></tr>`
-        ).join('') + '</table>'
-    }
+    const top = Array.from(clientMap.entries())
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 15)
+
+    // Big-stats row
+    document.getElementById('ph-total').textContent = fmtNum(totalQ)
+    document.getElementById('ph-blocked').textContent = fmtNum(blocked)
+    document.getElementById('ph-pct').textContent = pct + '%'
+    document.getElementById('ph-clients-n').textContent = String(top.length)
+
+    // Donut + legend. The color palette mirrors the dark-mode categorical
+    // palette used elsewhere in the dashboard so the chart reads as part
+    // of the same design language.
+    renderPiholePie(top)
   } catch (e) {
     console.warn('refreshLan failed:', e)
   }
@@ -486,6 +547,110 @@ async function refreshLan() {
 
 refreshLan()
 setInterval(refreshLan, LAN_POLL_MS)
+
+// Categorical palette for the Pi-hole donut + legend rows. Same color
+// rendered for segment N of the donut and row N of the legend so the
+// legend maps visually to the slice. Index 0 = the largest client, etc.
+const PIE_PALETTE = [
+  '#58a6ff', '#3fb950', '#d29922', '#f85149', '#a371f7',
+  '#ff7b72', '#7d8590', '#56d364', '#f0883e', '#79c0ff',
+  '#e3b341', '#bc8cff', '#ff8182', '#56d4dd', '#9e6a03',
+]
+
+// Polar→cartesian helper: ang_deg = 0 is at 3 o'clock, but for a pie
+// we want 0 = 12 o'clock and clockwise, so we shift by -90°.
+function polar(cx, cy, r, ang_deg) {
+  const a = (ang_deg - 90) * Math.PI / 180
+  return [cx + r * Math.cos(a), cy + r * Math.sin(a)]
+}
+
+// Build a single pie slice as an SVG `<path d="…"/>`. Returns the path
+// string. Uses moveTo + arc + close for outer→inner arcs.
+function pieSlicePath(cx, cy, rOuter, rInner, startDeg, endDeg) {
+  // Clamp to 359.99° for the rare full-circle case.
+  if (endDeg - startDeg >= 359.999) endDeg = startDeg + 359.999
+  const [x1, y1] = polar(cx, cy, rOuter, startDeg)
+  const [x2, y2] = polar(cx, cy, rOuter, endDeg)
+  const [x3, y3] = polar(cx, cy, rInner, endDeg)
+  const [x4, y4] = polar(cx, cy, rInner, startDeg)
+  const largeArc = (endDeg - startDeg) > 180 ? 1 : 0
+  return [
+    `M ${x1.toFixed(2)} ${y1.toFixed(2)}`,
+    `A ${rOuter} ${rOuter} 0 ${largeArc} 1 ${x2.toFixed(2)} ${y2.toFixed(2)}`,
+    `L ${x3.toFixed(2)} ${y3.toFixed(2)}`,
+    `A ${rInner} ${rInner} 0 ${largeArc} 0 ${x4.toFixed(2)} ${y4.toFixed(2)}`,
+    'Z',
+  ].join(' ')
+}
+
+// Build the Pi-hole donut + legend in one go. The slices are rendered in
+// `top` order (largest count first) so the legend rows visually correspond
+// to wedge sizes going clockwise from 12 o'clock.
+function renderPiholePie(top) {
+  const pieEl = document.getElementById('ph-pie')
+  const legendEl = document.getElementById('ph-legend')
+  if (!pieEl || !legendEl) return
+
+  // Filter out zero-count entries so the pie isn't dominated by empty wedges.
+  const slices = top.filter(([ip, c]) => c > 0)
+  const total = slices.reduce((acc, [, c]) => acc + c, 0)
+
+  if (total === 0) {
+    pieEl.innerHTML = '<svg viewBox="0 0 220 220" class="ph-pie-svg"><circle cx="110" cy="110" r="80" fill="none" stroke="var(--border)" stroke-width="2"/></svg><div class="ph-pie-center"><div class="big-num">0</div><div class="big-l">queries</div></div>'
+    legendEl.innerHTML = '<em>sin datos de clientes</em>'
+    return
+  }
+
+  // Render the donut (radius 110 outer / 60 inner) inside a 220x220 SVG.
+  const CX = 110, CY = 110, RO = 110, RI = 60
+  const segs = []
+  let cursor = 0
+  for (let i = 0; i < slices.length; i++) {
+    const [ip, c] = slices[i]
+    const frac = c / total
+    const span = frac * 360
+    // SVG path for this slice. Skip 0-span (only happens if many zero entries).
+    if (span > 0) {
+      const start = cursor
+      const end = cursor + span
+      segs.push(
+        `<path d="${pieSlicePath(CX, CY, RO, RI, start, end)}" `
+        + `fill="${PIE_PALETTE[i % PIE_PALETTE.length]}" `
+        + `stroke="var(--card-bg)" stroke-width="1" data-ip="${escHtml(ip)}" `
+        + `data-count="${c}" data-pct="${(frac*100).toFixed(1)}">`
+        + `<title>${escHtml(ip)}: ${fmtNum(c)} (${(frac*100).toFixed(1)}%)</title></path>`
+      )
+    }
+    cursor += span
+  }
+  pieEl.innerHTML = `
+    <svg viewBox="0 0 220 220" class="ph-pie-svg" aria-label="Distribución de queries DNS por cliente">
+      ${segs.join('')}
+      <circle cx="${CX}" cy="${CY}" r="${RI - 1}" fill="var(--card-bg)" pointer-events="none"/>
+    </svg>
+    <div class="ph-pie-center">
+      <div class="big-num">${fmtNum(total)}</div>
+      <div class="big-l">queries</div>
+    </div>`
+
+  // Legend: one row per slice. Keeps the same order as top (descending
+  // count), so the row at the top of the legend is the same color as the
+  // 12-o'clock wedge.
+  legendEl.innerHTML = slices.slice(0, 12).map(([ip, c], i) => {
+    const pct = ((c / total) * 100).toFixed(1)
+    const color = PIE_PALETTE[i % PIE_PALETTE.length]
+    return `
+      <div class="ph-legend-row">
+        <span class="ph-sw" style="background:${color}"></span>
+        <span class="ph-ip">${escHtml(ip)}</span>
+        <span class="ph-q">${fmtNum(c)}</span>
+        <span class="ph-p">${pct}%</span>
+      </div>
+    `
+  }).join('') + (slices.length > 12
+    ? `<div class="ph-legend-row" style="opacity:.7"><span class="ph-sw"></span><span class="ph-ip">+${slices.length - 12} más…</span></div>`
+    : '')
+}
 
 // --- docker container inspector --------------------------------------------
 //
