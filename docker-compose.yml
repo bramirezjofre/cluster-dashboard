@@ -12,6 +12,12 @@ name: cluster-dashboard
 # server-agentes (Ubuntu 24, 8 cores, the only one with /mnt/data
 # attached). To drop one, remove it from the env var and recreate the
 # container.
+#
+# LAN monitoring: the daemon also polls the local LAN via ARP scan and
+# queries one or more Pi-hole v6 instances for DNS stats. Pi-hole hosts
+# and passwords come from .env (see .env.example); the entrypoint assembles
+# them into PIHOLE_HOSTS at container start so the password never appears
+# in this file or in `docker compose config` output.
 
 services:
   dashboard:
@@ -26,6 +32,11 @@ services:
       # trust. If you want to expose it beyond the LAN, put it behind
       # Nginx Proxy Manager with auth — see README.
       - "9090:9090"
+    # Run in the host network namespace so ARP scans reach the LAN that
+    # the host is on (otherwise the container only sees its own docker
+    # bridge subnet). Port mapping above still works because we bind
+    # 9090 directly on the host.
+    network_mode: host
     environment:
       PORT: "9090"
       POLL_INTERVAL_MS: "30000"
@@ -45,6 +56,17 @@ services:
       ALERT_TELEGRAM_CHAT_ID: ${ALERT_TELEGRAM_CHAT_ID}
       ALERT_DISK_THRESHOLD: "65"
       ALERT_COOLDOWN_MIN: "60"
+      # LAN monitoring — Pi-hole host:port pairs only; passwords are read
+      # from .env (PIHOLE_PASSWORD_1/2) and assembled into PIHOLE_HOSTS by
+      # entrypoint.sh. To add a third Pi-hole: add PIHOLE_HOST_3 /
+      # PIHOLE_PASSWORD_3 here and extend entrypoint.sh accordingly.
+      PIHOLE_HOST_1: ${PIHOLE_HOST_1:-}
+      PIHOLE_PASSWORD_1: ${PIHOLE_PASSWORD_1:-}
+      PIHOLE_HOST_2: ${PIHOLE_HOST_2:-}
+      PIHOLE_PASSWORD_2: ${PIHOLE_PASSWORD_2:-}
+      LAN_SUBNET: "192.168.0.0/24"
+      LAN_POLL_INTERVAL_MS: "60000"
+      LAN_HISTORY_SAMPLES: "720"
     volumes:
       - /home/bramirezj/.ssh:/home/bramirezj/.ssh:ro
       # The .env file holds secrets (telegram bot token, chat id). Compose
@@ -58,6 +80,17 @@ services:
     # a readiness probe that distinguishes "polling" from "crashed". Add a
     # GET /api/health that returns 200 only after the first successful poll
     # if you wire healthcheck to compose's depends_on: condition: healthy.
+
+  # Standalone test runner — builds from Dockerfile.test (no runtime deps,
+  # just the test files) and exits with the test exit code. Useful for CI
+  # or running tests without polluting the host's node_modules.
+  # Run:  docker compose run --rm test
+  test:
+    build:
+      context: .
+      dockerfile: Dockerfile.test
+    image: cluster-dashboard-test:latest
+    profiles: ["test"]   # not started by `docker compose up`; opt-in
 
 volumes:
   cluster-dashboard-data:

@@ -124,6 +124,16 @@
   .container-row .name { color: var(--label); font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .container-row .image { color: var(--label-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .container-row .status { color: var(--label-2); font-size: 11px; }
+
+  /* LAN monitoring cards */
+  .lan-card { margin-top: 16px; cursor: default; }
+  .lan-card:hover { border-color: var(--border); }
+  .lan-card .muted { color: var(--label-2); font-size: 12px; margin: 4px 0 8px 0; }
+  .lan-table { width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 12px; }
+  .lan-table td { padding: 4px 8px; border-bottom: 1px solid var(--border); }
+  .lan-table td:nth-child(2) { color: var(--label-2); }
+  .lan-table td.num { text-align: right; color: var(--acc); }
+  .lan-table tr:last-child td { border-bottom: none; }
   .log-box {
     background: #0a0c10; border: 1px solid var(--border); border-radius: 8px;
     padding: 12px 14px; font-family: var(--mono); font-size: 12px; line-height: 1.55;
@@ -147,6 +157,22 @@
 <main id="cards">
   <div class="loading">loading…</div>
 </main>
+
+<!-- LAN monitoring — populated by refreshLan() in the script below.
+     Kept outside #cards so the card click delegation doesn't treat them
+     as server cards (they don't open a containers modal). -->
+<section class="card lan-card" id="lan-devices">
+  <div class="head"><span class="name">Dispositivos LAN</span><span class="status" id="lan-count-badge">—</span></div>
+  <p class="muted">Último ARP scan: <span id="lan-ts">—</span></p>
+  <div id="lan-list"><em>cargando…</em></div>
+</section>
+
+<section class="card lan-card" id="lan-pihole">
+  <div class="head"><span class="name">Tráfico DNS (Pi-hole)</span><span class="status" id="ph-status-badge">—</span></div>
+  <p class="muted" id="ph-summary">—</p>
+  <p class="muted" id="ph-clients-summary">—</p>
+  <div id="ph-clients"><em>cargando…</em></div>
+</section>
 <script>
 const POLL_MS = 30_000
 const CARDS = document.getElementById('cards')
@@ -279,6 +305,42 @@ function renderCard(alias, s, h) {
   `
 }
 
+// Long-term history fallback per alias, in case the in-memory ring buffer
+// is empty after a container restart (e.g. just after `docker restart`).
+// Filled lazily by fetchAllHistory() and merged with the live ring buffer at
+// render time.
+const historicalByAlias = {} // alias -> { ts:[], cpu:[], mem:[], load1:[] }
+
+async function fetchAllHistory() {
+  // Discover the configured aliases from the live status payload. Each
+  // alias gets its own query against /api/cluster/history so the response
+  // for one slow server doesn't block the others.
+  try {
+    const r = await fetch('/api/cluster/status', { cache: 'no-store' })
+    const d = await r.json()
+    const aliases = Object.keys(d.servers || {})
+    await Promise.all(aliases.map(async (alias) => {
+      // 7 days back covers any reasonably recent rebuild while staying well
+      // under the 5000-row cap (350 samples/hour * 24 * 7 = ~58k, but
+      // /api/cluster/history caps the row count so we're always bounded).
+      const from = Date.now() - 7 * 24 * 60 * 60 * 1000
+      const url = `/api/cluster/history?alias=${encodeURIComponent(alias)}&from=${from}&limit=2000`
+      try {
+        const hr = await fetch(url, { cache: 'no-store' })
+        const h = await hr.json()
+        if (h && h.ok && Array.isArray(h.samples)) {
+          historicalByAlias[alias] = {
+            ts: h.samples.map(s => s.ts),
+            cpu: h.samples.map(s => s.cpu),
+            mem: h.samples.map(s => s.mem_pct),
+            load1: h.samples.map(s => s.load1),
+          }
+        }
+      } catch (_) { /* fall back to ring buffer only */ }
+    }))
+  } catch (_) { /* offline at boot, will retry via tick() */ }
+}
+
 async function tick() {
   try {
     const r = await fetch('/api/cluster/status', { cache: 'no-store' })
@@ -286,15 +348,144 @@ async function tick() {
     elLast.textContent = fmtAgo(d.lastPollAt)
     elErrs.textContent = String(d.pollErrors || 0)
     elIv.textContent = String(Math.round((d.pollIntervalMs || 30000) / 1000))
-    const cards = Object.entries(d.servers).map(([alias, s]) => renderCard(alias, s, d.history[alias] || {}))
+    const cards = Object.entries(d.servers).map(([alias, s]) => {
+      const live = d.history[alias] || {}
+      const hist = historicalByAlias[alias]
+      // Merge historical long-term + live ring buffer for each series, so
+      // charts are populated even right after a restart.
+      const mergeOne = (liveArr, histArr) => {
+        if (!hist || !histArr) return liveArr || []
+        if (!liveArr || liveArr.length === 0) return histArr
+        // Find boundary: last historical sample older than first live sample
+        const firstLiveTs = live.ts[0]
+        const idx = hist.ts.findIndex(t => t >= firstLiveTs)
+        return idx === -1 ? liveArr : histArr.slice(0, idx).concat(liveArr)
+      }
+      return renderCard(alias, s, {
+        ts: live.ts || [],
+        cpu: mergeOne(live.cpu, hist && hist.cpu),
+        mem: mergeOne(live.mem, hist && hist.mem),
+        load1: mergeOne(live.load1, hist && hist.load1),
+      })
+    })
     CARDS.innerHTML = cards.join('') || '<div class="loading">no servers configured</div>'
   } catch (e) {
     elLast.textContent = 'fetch failed: ' + e.message
   }
 }
 
+// One-shot long-term history fetch on boot, before the first tick paints.
+// Retry once if the first attempt races with the daemon still wiring up.
+async function bootHistory() {
+  await fetchAllHistory()
+}
+
 tick()
+bootHistory()
 setInterval(tick, POLL_MS)
+// Re-pull long-term history every 5 min so restored containers pick up
+// newer rows that arrived while the daemon was down.
+setInterval(fetchAllHistory, 5 * 60 * 1000)
+
+// --- LAN monitoring ---------------------------------------------------------
+// Polls /api/lan/status and renders the two cards outside #cards. Decoupled
+// from the 30s server poll because LAN data changes more slowly and the
+// ARP scan is heavy enough that 60s is the right cadence.
+
+const LAN_POLL_MS = 60_000
+
+function fmtTime(ts) {
+  if (!ts) return '—'
+  return new Date(ts).toLocaleTimeString()
+}
+function fmtNum(n) {
+  return (n || 0).toLocaleString('es-CL')
+}
+function escHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+  }[c]))
+}
+
+async function refreshLan() {
+  try {
+    const r = await fetch('/api/lan/status')
+    if (!r.ok) throw new Error('status ' + r.status)
+    const data = await r.json()
+    // ARP
+    const arp = data.arp || { devices: [] }
+    document.getElementById('lan-ts').textContent = fmtTime(arp.ts)
+    document.getElementById('lan-count-badge').textContent = (arp.devices || []).length + ' activos'
+    const list = document.getElementById('lan-list')
+    if (!arp.devices || !arp.devices.length) {
+      list.innerHTML = '<em>sin dispositivos detectados</em>'
+    } else {
+      list.innerHTML = '<table class="lan-table">' +
+        arp.devices.slice(0, 40).map(d =>
+          `<tr><td>${escHtml(d.ip)}</td><td>${escHtml(d.mac || '—')}</td></tr>`
+        ).join('') + '</table>'
+    }
+    // Pi-hole (aggregate across all configured instances)
+    const ph = data.pihole || {}
+    const keys = Object.keys(ph)
+    let totalQ = 0, blocked = 0, okCount = 0, failCount = 0
+    keys.forEach(k => {
+      const e = ph[k]
+      if (e && e.ok) {
+        totalQ += (e.totalQueries || 0)
+        blocked += (e.blockedQueries || 0)
+        okCount++
+      } else if (e) {
+        failCount++
+      }
+    })
+    const pct = totalQ > 0 ? ((blocked / totalQ) * 100).toFixed(1) : '0.0'
+    const badge = document.getElementById('ph-status-badge')
+    if (failCount === 0 && okCount > 0) {
+      badge.textContent = okCount + ' OK'
+      badge.className = 'status ok'
+    } else if (okCount > 0 && failCount > 0) {
+      badge.textContent = okCount + ' OK / ' + failCount + ' fail'
+      badge.className = 'status bad'
+    } else if (failCount > 0) {
+      badge.textContent = failCount + ' fail'
+      badge.className = 'status bad'
+    } else {
+      badge.textContent = 'sin datos'
+      badge.className = 'status'
+    }
+    document.getElementById('ph-summary').textContent =
+      keys.length + ' Pi-hole' + (keys.length === 1 ? '' : 's') +
+      ' · ' + fmtNum(totalQ) + ' queries totales · ' +
+      fmtNum(blocked) + ' bloqueadas (' + pct + '%)'
+    // Top clients aggregated
+    const clientMap = new Map()
+    keys.forEach(k => {
+      const e = ph[k]
+      if (!e || !e.ok) return
+      ;(e.topClients || []).forEach(c => {
+        clientMap.set(c.ip, (clientMap.get(c.ip) || 0) + (c.count || 0))
+      })
+    })
+    const top = Array.from(clientMap.entries()).sort((a, b) => b[1] - a[1]).slice(0, 15)
+    document.getElementById('ph-clients-summary').textContent =
+      'Top ' + top.length + ' clientes (suma de queries DNS)'
+    const cl = document.getElementById('ph-clients')
+    if (!top.length) {
+      cl.innerHTML = '<em>sin datos</em>'
+    } else {
+      cl.innerHTML = '<table class="lan-table">' +
+        top.map(([ip, count]) =>
+          `<tr><td>${escHtml(ip)}</td><td class="num">${fmtNum(count)}</td></tr>`
+        ).join('') + '</table>'
+    }
+  } catch (e) {
+    console.warn('refreshLan failed:', e)
+  }
+}
+
+refreshLan()
+setInterval(refreshLan, LAN_POLL_MS)
 
 // --- docker container inspector --------------------------------------------
 //
