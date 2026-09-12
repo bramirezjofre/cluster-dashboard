@@ -24,14 +24,22 @@ BUILD_GID="${BUILD_GID:-1000}"
 # optional; only defined pairs are assembled. Result format:
 #   "host:port:password,host:port:password"
 #
-# Uses eval to read PIHOLE_HOST_N / PIHOLE_PASSWORD_N. POSIX sh doesn't
-# support ${!var} indirect expansion, but this script also runs on
-# Alpine's busybox ash where bashisms would fail. eval works on both.
+# Two pitfalls avoided here:
+#   1. `$$` in docker compose's .env becomes literal `$` BEFORE the script
+#      runs. So a password like `Pa$$w0rd` arrives as `Pa$w0rd` to this
+#      script. Storing it back via `printf %s` (rather than eval) keeps
+#      it intact.
+#   2. bash/dash don't allow `${PIHOLE_HOST_$n:-}` in all POSIX sh variants.
+#      Workaround: read each value with `printenv` (an external command)
+#      which returns the literal value of a named variable.
 if [ -z "${PIHOLE_HOSTS:-}" ]; then
   PIHOLE_HOSTS=""
   for n in 1 2 3 4 5; do
-    eval "h=\${PIHOLE_HOST_${n}:-}"
-    eval "p=\${PIHOLE_PASSWORD_${n}:-}"
+    # printenv returns the literal value (no expansion), so passwords
+    # with `$` survive untouched. If the env var doesn't exist, it
+    # exits non-zero; fall back to empty.
+    h=$(printenv "PIHOLE_HOST_${n}" 2>/dev/null || true)
+    p=$(printenv "PIHOLE_PASSWORD_${n}" 2>/dev/null || true)
     if [ -n "$h" ] && [ -n "$p" ]; then
       if [ -z "$PIHOLE_HOSTS" ]; then
         PIHOLE_HOSTS="${h}:${p}"
