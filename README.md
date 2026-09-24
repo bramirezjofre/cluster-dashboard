@@ -17,9 +17,11 @@ container itself.
 - Keeps a ring buffer of the last `HISTORY_SAMPLES` samples (default 120
   = 1h at 30s) per metric, per server, in memory
 - Serves the dashboard HTML and a JSON snapshot from `/api/cluster/status`
-- Polls the local LAN via ARP scan and queries configured Pi-hole v6
-  instances for DNS stats (see "LAN monitoring" below). Result is
-  available at `/api/lan/status` and `/api/lan/history`.
+- Polls the local LAN via ARP scan and reads host NIC byte counters
+  (rx/tx Kbps) so we can see traffic flowing through the host's LAN
+  interface (see "LAN monitoring" below). Available at
+  `/api/lan/status`, `/api/lan/history`, `/api/iface/status`, and
+  `/api/iface/history`.
 
 ## What it does NOT do
 
@@ -35,45 +37,50 @@ container itself.
 
 The daemon also tracks what's happening on the local network:
 
-- **ARP scan** of `LAN_SUBNET` (default `192.168.0.0/24`) every
+- **ARP scan** of `LAN_SUBNET` (default `192.168.1.0/24`) every
   `LAN_POLL_INTERVAL_MS` (default 60s). Result is a table of IP + MAC
   pairs for active hosts, shown in the "Dispositivos LAN" card.
-- **Pi-hole stats** for each instance configured in `.env`. The
-  dashboard calls Pi-hole's v6 API (`/api/auth`, `/api/stats/summary`,
-  `/api/stats/top_clients`) to show total queries, blocked queries,
-  percent blocked, and top clients. Multiple Pi-holes are supported and
-  stats are aggregated.
+- **Interface traffic** for the host's LAN-facing NIC (default
+  `enp2s0`) every `IFACE_POLL_INTERVAL_MS` (default 30s). The
+  daemon reads `/sys/class/net/<iface>/statistics/{rx,tx}_bytes` and
+  derives Kbps from the delta. Shown in the "Tráfico LAN" card with
+  a sparkline of the last 30 minutes.
 
-### Configuring Pi-hole
+### Configuring interface traffic
 
-Pi-hole hosts and passwords live in `.env` (gitignored). See
-`.env.example` for the format. The container's `entrypoint.sh` reads
-them at startup and assembles the `PIHOLE_HOSTS` env var, so the
-password never appears in `docker-compose.yml` or in `docker compose
-config` output. Up to 5 instances are wired by default; extend
-`entrypoint.sh` if you need more.
+The "Tráfico LAN" card shows real-time RX/TX Kbps on the host's LAN
+interface by reading `/sys/class/net/<iface>/statistics/{rx,tx}_bytes`
+every `IFACE_POLL_INTERVAL_MS` (default 30s) and deriving Kbps from
+the delta. Total bytes since boot is also shown.
 
-**Escape warning.** `docker compose` interprets `$$` in `.env` as a
-single escape character and drops one. If your Pi-hole password
-contains literal `$$` (e.g. `Pa$$w0rd`), write `$$$$` in `.env` so
-the container receives the right value. `.env.example` shows the
-working form.
+**Required:** the container must run with `network_mode: host` (set in
+`docker-compose.yml`) so it can read host counters. If you see only
+docker bridge traffic, verify the `network_mode: host` line is present.
+
+Override defaults via `.env`:
 
 ```ini
-# .env
-PIHOLE_HOST_1=192.168.0.11:8080
-PIHOLE_PASSWORD_1=<password with $$ escaped as $$$$>
-PIHOLE_HOST_2=192.168.0.18:80
-PIHOLE_PASSWORD_2=<password with $$ escaped as $$$$>
+IFACE=enp2s0              # LAN-facing NIC. 'eth0' on Raspberry Pi hosts.
+IFACE_POLL_INTERVAL_MS=30000
+IFACE_HISTORY_SAMPLES=1440  # in-memory ring buffer; long-term lives in SQLite.
 ```
+
+### Configuring the ARP subnet
+
+`LAN_SUBNET` (default `192.168.1.0/24`) is the subnet the ARP scanner
+pings to populate the "Dispositivos LAN" card. Override if your ISP
+router uses a different range.
 
 ### Endpoints
 
 - `GET /api/lan/status` — current snapshot: `{ arp: { ts, devices[] },
-  pihole: { "<host>:<port>": { ts, ok, totalQueries, blockedQueries,
-  percentBlocked, topClients: [{ip, name, count}] } } }`
-- `GET /api/lan/history?source=arp|pihole:<host>:<port>&from=<ms>&to=<ms>&limit=<n>`
-  — historical samples from SQLite (retention: `HISTORY_DAYS`, default 30).
+  lastError: string|null }`
+- `GET /api/lan/history?source=arp&from=<ms>&to=<ms>&limit=<n>` —
+  historical ARP samples (default: last 24h, max 5000 rows)
+- `GET /api/iface/status` — current iface counters: `{ iface, ts,
+  rxBytes, txBytes, rxKbps, txKbps, ok, error }`
+- `GET /api/iface/history?from=<ms>&to=<ms>&limit=<n>` — historical
+  samples for the default interface
 
 ### Caveats
 
@@ -81,10 +88,9 @@ PIHOLE_PASSWORD_2=<password with $$ escaped as $$$$>
   ARP entry. A powered-off device disappears from the list until it
   comes back. The Samsung S20fe this dashboard runs on is a typical
   example — it appears only when awake.
-- Pi-hole sees DNS queries, not raw traffic. Total bytes transferred
-  per device is not available without per-host network taps (which
-  require either a managed switch with port mirroring or a router that
-  exports NetFlow/sFlow, neither of which is in scope here).
+- Interface traffic reflects only what's flowing through the host's
+  LAN NIC. Devices on a different physical segment (e.g. behind a
+  separate AP) won't be visible.
 - The container runs with `network_mode: host` so the ARP scan can
   reach the LAN. Without it the container only sees its own docker
   bridge subnet (172.x).
@@ -108,9 +114,9 @@ start it:
 docker compose run --rm test
 ```
 
-The test suite currently covers `src/pihole.js` (login flow, 401
-relogin, error paths) and `src/arp.js` (ARP cache parsing). Tests use
-`node --test`, no extra dependencies.
+The test suite currently covers `src/arp.js` (ARP cache parsing) and
+`src/iface_traffic.js` (byte counter parser, Kbps derivation, sample
+function). Tests use `node --test`, no extra dependencies.
 
 ## Layout
 

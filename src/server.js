@@ -22,8 +22,8 @@ import { resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { Client } from 'ssh2'
 import Database from 'better-sqlite3'
-import { pollPihole } from './pihole.js'
 import { arpScan } from './arp.js'
+import { sampleIface } from './iface_traffic.js'
 import { check as checkAlerts } from './notifier.js'
 
 // __dirname equivalent for ESM. fileURLToPath(import.meta.url) gives the
@@ -51,20 +51,15 @@ const SERVERS = (process.env.CLUSTER_SERVERS || 'server-11,server-17,server-18,s
   .filter(Boolean)
 
 // --- LAN monitoring config -------------------------------------------------
-// PIHOLE_HOSTS format: "host:port:password,host:port:password"
-// (assembled by entrypoint.sh from PIHOLE_HOST_N + PIHOLE_PASSWORD_N to
-// keep secrets out of docker-compose.yml.)
-const LAN_SUBNET = process.env.LAN_SUBNET || '192.168.0.0/24'
+const LAN_SUBNET = process.env.LAN_SUBNET || '192.168.1.0/24'
 const LAN_POLL_INTERVAL_MS = +(process.env.LAN_POLL_INTERVAL_MS || 60_000)
 const LAN_HISTORY_SAMPLES = +(process.env.LAN_HISTORY_SAMPLES || 720)
-const PIHOLE_HOSTS = (process.env.PIHOLE_HOSTS || '')
-  .split(',')
-  .map(s => s.trim())
-  .filter(Boolean)
-  .map(spec => {
-    const [host, port, password] = spec.split(':')
-    return { host, port: +(port || 80), password: password || '' }
-  })
+// Host network interface to read byte counters from. Should be the LAN-
+// facing NIC — typically enp2s0 / eth0. The dashboard container must
+// have network_mode: host for these counters to reflect host traffic.
+const IFACE = process.env.IFACE || 'enp2s0'
+const IFACE_POLL_INTERVAL_MS = +(process.env.IFACE_POLL_INTERVAL_MS || 30_000)
+const IFACE_HISTORY_SAMPLES = +(process.env.IFACE_HISTORY_SAMPLES || 1440)
 
 // Long-term history lives in SQLite. Default path is inside the
 // `cluster-dashboard-data` Docker volume mounted at /data so a container
@@ -104,11 +99,22 @@ db.exec(`
 
   CREATE TABLE IF NOT EXISTS lan_samples (
     ts INTEGER NOT NULL,
-    source TEXT NOT NULL,            -- 'arp' | 'pihole:<host>:<port>'
+    source TEXT NOT NULL,            -- 'arp' (other sources may be added later)
     payload TEXT NOT NULL,
     PRIMARY KEY (source, ts)
   ) WITHOUT ROWID;
   CREATE INDEX IF NOT EXISTS idx_lan_ts ON lan_samples(ts);
+
+  -- Per-interface byte rate history. source is the interface name
+  -- (e.g. 'enp2s0'); payload is JSON with rx_bytes, tx_bytes (both as
+  -- strings because they're BigInt-sized), rx_kbps, tx_kbps, and ts.
+  CREATE TABLE IF NOT EXISTS iface_samples (
+    source TEXT NOT NULL,            -- interface name, e.g. 'enp2s0'
+    ts INTEGER NOT NULL,
+    payload TEXT NOT NULL,
+    PRIMARY KEY (source, ts)
+  ) WITHOUT ROWID;
+  CREATE INDEX IF NOT EXISTS idx_iface_ts ON iface_samples(ts);
 `)
 const insertSample = db.prepare(`
   INSERT OR REPLACE INTO samples
@@ -121,6 +127,9 @@ const insertContainerSnapshot = db.prepare(`
 const insertLanSample = db.prepare(`
   INSERT OR REPLACE INTO lan_samples (source, ts, payload) VALUES (?, ?, ?)
 `)
+const insertIfaceSample = db.prepare(`
+  INSERT OR REPLACE INTO iface_samples (source, ts, payload) VALUES (?, ?, ?)
+`)
 // Runs once on startup and then after every poll. Trims anything older
 // than HISTORY_DAYS so the file doesn't grow unbounded.
 function pruneOldSamples() {
@@ -128,6 +137,7 @@ function pruneOldSamples() {
   db.prepare('DELETE FROM samples WHERE ts < ?').run(cutoff)
   db.prepare('DELETE FROM container_snapshots WHERE ts < ?').run(cutoff)
   db.prepare('DELETE FROM lan_samples WHERE ts < ?').run(cutoff)
+  db.prepare('DELETE FROM iface_samples WHERE ts < ?').run(cutoff)
 }
 pruneOldSamples()
 setInterval(pruneOldSamples, 60 * 60 * 1000)
@@ -460,15 +470,13 @@ pollAll()
 
 // --- LAN monitoring ----------------------------------------------------------
 //
-// State is a snapshot used by /api/lan/status. Each Pi-hole instance gets a
-// key like "192.168.0.11:8080". ARP results are stored under .arp.
-// All writes go through insertLanSample so the SQLite table mirrors what's
-// shown to the user. Errors are caught here so a misbehaving Pi-hole never
-// breaks the rest of the daemon.
+// State is a snapshot used by /api/lan/status. ARP results are stored
+// under .arp. All writes go through insertLanSample so the SQLite table
+// mirrors what's shown to the user. Errors are caught here so a
+// transient scan failure never breaks the rest of the daemon.
 
 const lanState = {
   arp: { ts: 0, devices: [] },
-  pihole: {},
   lastError: null,
 }
 
@@ -483,24 +491,68 @@ async function pollLan() {
     lanState.lastError = `arp: ${e.message || String(e)}`
     console.error('[lan] arp scan failed:', e.message || e)
   }
-  // Pi-hole instances in parallel
-  await Promise.all(PIHOLE_HOSTS.map(async (inst) => {
-    const key = `${inst.host}:${inst.port}`
-    try {
-      const r = await pollPihole(inst)
-      lanState.pihole[key] = { ts, ...r }
-      insertLanSample.run(`pihole:${key}`, ts, JSON.stringify(r))
-    } catch (e) {
-      lanState.pihole[key] = { ts, ok: false, error: e.message || String(e) }
-      console.error(`[lan] pihole ${key} failed:`, e.message || e)
-    }
-  }))
 }
 
-if (PIHOLE_HOSTS.length > 0 || process.env.LAN_SUBNET) {
+if (process.env.LAN_SUBNET) {
   setInterval(pollLan, LAN_POLL_INTERVAL_MS).unref()
   pollLan()
 }
+
+// --- Interface traffic ------------------------------------------------------
+//
+// Reads rx/tx byte counters from /sys/class/net/<IFACE>/statistics/ on the
+// host (the dashboard container shares the host network namespace via
+// network_mode: host in docker-compose.yml). One sample per IFACE_POLL_INTERVAL_MS,
+// keeps the last IFACE_HISTORY_SAMPLES samples in memory for the ring buffer
+// and persists everything to the iface_samples table for long-term trends.
+
+const ifaceState = {
+  iface: IFACE,
+  ts: 0,
+  rxBytes: '0',      // string because BigInt-sized; serialize safely to JSON
+  txBytes: '0',
+  rxKbps: 0,
+  txKbps: 0,
+  ok: false,
+  error: null,
+}
+let prevIfaceSample = null
+
+async function pollIfaceTraffic() {
+  const now = Date.now()
+  const snap = sampleIface(IFACE, prevIfaceSample, now)
+  prevIfaceSample = snap
+
+  ifaceState.iface = snap.iface
+  ifaceState.ts = snap.ts
+  ifaceState.rxBytes = snap.rx.toString()
+  ifaceState.txBytes = snap.tx.toString()
+  ifaceState.rxKbps = snap.rxKbps
+  ifaceState.txKbps = snap.txKbps
+  ifaceState.ok = snap.ok
+  ifaceState.error = snap.ok ? null : (snap.error ?? 'unknown')
+
+  if (snap.ok) {
+    const payload = {
+      ts: snap.ts,
+      rx_bytes: snap.rx.toString(),
+      tx_bytes: snap.tx.toString(),
+      rx_kbps: snap.rxKbps,
+      tx_kbps: snap.txKbps,
+    }
+    insertIfaceSample.run(IFACE, snap.ts, JSON.stringify(payload))
+    ringPush(ifaceHistory, { ts: snap.ts, rx_kbps: snap.rxKbps, tx_kbps: snap.txKbps })
+  } else {
+    console.error('[iface] sample failed:', snap.error)
+  }
+}
+
+// Ring buffer for sparkline rendering. Reuses the cluster dashboard's
+// makeRing/ringPush so the frontend gets the same shape (history.samples).
+const ifaceHistory = makeRing(IFACE_HISTORY_SAMPLES)
+
+setInterval(pollIfaceTraffic, IFACE_POLL_INTERVAL_MS).unref()
+pollIfaceTraffic()
 
 // --- http --------------------------------------------------------------------
 
@@ -532,6 +584,24 @@ app.get('/api/lan/history', (req, res) => {
   ).all(source, from, to, limit)
   res.json({
     source,
+    range: { from, to },
+    rows: rows.map(r => ({ ts: r.ts, payload: JSON.parse(r.payload) })),
+  })
+})
+
+// Interface traffic endpoints.
+app.get('/api/iface/status', (_req, res) => res.json(ifaceState))
+
+app.get('/api/iface/history', (req, res) => {
+  const now = Date.now()
+  const to = Math.max(0, Math.min(now, +(req.query.to || now)))
+  const from = Math.max(0, Math.min(to, +(req.query.from || (to - 24 * 60 * 60 * 1000))))
+  const limit = Math.max(1, Math.min(5000, +(req.query.limit || 5000)))
+  const rows = db.prepare(
+    `SELECT ts, payload FROM iface_samples WHERE source = ? AND ts >= ? AND ts <= ? ORDER BY ts ASC LIMIT ?`
+  ).all(IFACE, from, to, limit)
+  res.json({
+    source: IFACE,
     range: { from, to },
     rows: rows.map(r => ({ ts: r.ts, payload: JSON.parse(r.payload) })),
   })

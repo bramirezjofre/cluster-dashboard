@@ -14,10 +14,9 @@ name: cluster-dashboard
 # container.
 #
 # LAN monitoring: the daemon also polls the local LAN via ARP scan and
-# queries one or more Pi-hole v6 instances for DNS stats. Pi-hole hosts
-# and passwords come from .env (see .env.example); the entrypoint assembles
-# them into PIHOLE_HOSTS at container start so the password never appears
-# in this file or in `docker compose config` output.
+# reads host NIC byte counters (rx/tx Kbps) so we can see the traffic
+# flowing through the host's LAN interface even when the ISP router
+# blocks DNS changes or SNMP.
 
 services:
   dashboard:
@@ -56,17 +55,13 @@ services:
       ALERT_TELEGRAM_CHAT_ID: ${ALERT_TELEGRAM_CHAT_ID}
       ALERT_DISK_THRESHOLD: "65"
       ALERT_COOLDOWN_MIN: "60"
-      # LAN monitoring — Pi-hole host:port pairs only; passwords are read
-      # from .env (PIHOLE_PASSWORD_1/2) and assembled into PIHOLE_HOSTS by
-      # entrypoint.sh. To add a third Pi-hole: add PIHOLE_HOST_3 /
-      # PIHOLE_PASSWORD_3 here and extend entrypoint.sh accordingly.
-      PIHOLE_HOST_1: ${PIHOLE_HOST_1:-}
-      PIHOLE_PASSWORD_1: ${PIHOLE_PASSWORD_1:-}
-      PIHOLE_HOST_2: ${PIHOLE_HOST_2:-}
-      PIHOLE_PASSWORD_2: ${PIHOLE_PASSWORD_2:-}
-      LAN_SUBNET: "192.168.0.0/24"
-      LAN_POLL_INTERVAL_MS: "60000"
-      LAN_HISTORY_SAMPLES: "720"
+      # LAN monitoring — host network interface for traffic counters.
+      # Default enp2s0 is the LAN NIC on the host. Set to 'eth0' on
+      # Raspberry Pi hosts.
+      IFACE: "enp2s0"
+      IFACE_POLL_INTERVAL_MS: "30000"
+      IFACE_HISTORY_SAMPLES: "1440"
+      LAN_SUBNET: "192.168.1.0/24"
     volumes:
       - /home/bramirezj/.ssh:/home/bramirezj/.ssh:ro
       # The .env file holds secrets (telegram bot token, chat id). Compose
