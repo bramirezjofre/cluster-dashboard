@@ -22,7 +22,6 @@ import { resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { Client } from 'ssh2'
 import Database from 'better-sqlite3'
-import { pollPihole } from './pihole.js'
 import { arpScan } from './arp.js'
 import { sampleIface } from './iface_traffic.js'
 import { check as checkAlerts } from './notifier.js'
@@ -52,9 +51,6 @@ const SERVERS = (process.env.CLUSTER_SERVERS || 'server-11,server-17,server-18,s
   .filter(Boolean)
 
 // --- LAN monitoring config -------------------------------------------------
-// PIHOLE_HOSTS format: "host:port:password,host:port:password"
-// (assembled by entrypoint.sh from PIHOLE_HOST_N + PIHOLE_PASSWORD_N to
-// keep secrets out of docker-compose.yml.)
 const LAN_SUBNET = process.env.LAN_SUBNET || '192.168.1.0/24'
 const LAN_POLL_INTERVAL_MS = +(process.env.LAN_POLL_INTERVAL_MS || 60_000)
 const LAN_HISTORY_SAMPLES = +(process.env.LAN_HISTORY_SAMPLES || 720)
@@ -64,14 +60,6 @@ const LAN_HISTORY_SAMPLES = +(process.env.LAN_HISTORY_SAMPLES || 720)
 const IFACE = process.env.IFACE || 'enp2s0'
 const IFACE_POLL_INTERVAL_MS = +(process.env.IFACE_POLL_INTERVAL_MS || 30_000)
 const IFACE_HISTORY_SAMPLES = +(process.env.IFACE_HISTORY_SAMPLES || 1440)
-const PIHOLE_HOSTS = (process.env.PIHOLE_HOSTS || '')
-  .split(',')
-  .map(s => s.trim())
-  .filter(Boolean)
-  .map(spec => {
-    const [host, port, password] = spec.split(':')
-    return { host, port: +(port || 80), password: password || '' }
-  })
 
 // Long-term history lives in SQLite. Default path is inside the
 // `cluster-dashboard-data` Docker volume mounted at /data so a container
@@ -111,7 +99,7 @@ db.exec(`
 
   CREATE TABLE IF NOT EXISTS lan_samples (
     ts INTEGER NOT NULL,
-    source TEXT NOT NULL,            -- 'arp' | 'pihole:<host>:<port>'
+    source TEXT NOT NULL,            -- 'arp' (other sources may be added later)
     payload TEXT NOT NULL,
     PRIMARY KEY (source, ts)
   ) WITHOUT ROWID;
@@ -482,15 +470,13 @@ pollAll()
 
 // --- LAN monitoring ----------------------------------------------------------
 //
-// State is a snapshot used by /api/lan/status. Each Pi-hole instance gets a
-// key like "192.168.0.11:8080". ARP results are stored under .arp.
-// All writes go through insertLanSample so the SQLite table mirrors what's
-// shown to the user. Errors are caught here so a misbehaving Pi-hole never
-// breaks the rest of the daemon.
+// State is a snapshot used by /api/lan/status. ARP results are stored
+// under .arp. All writes go through insertLanSample so the SQLite table
+// mirrors what's shown to the user. Errors are caught here so a
+// transient scan failure never breaks the rest of the daemon.
 
 const lanState = {
   arp: { ts: 0, devices: [] },
-  pihole: {},
   lastError: null,
 }
 
@@ -505,21 +491,9 @@ async function pollLan() {
     lanState.lastError = `arp: ${e.message || String(e)}`
     console.error('[lan] arp scan failed:', e.message || e)
   }
-  // Pi-hole instances in parallel
-  await Promise.all(PIHOLE_HOSTS.map(async (inst) => {
-    const key = `${inst.host}:${inst.port}`
-    try {
-      const r = await pollPihole(inst)
-      lanState.pihole[key] = { ts, ...r }
-      insertLanSample.run(`pihole:${key}`, ts, JSON.stringify(r))
-    } catch (e) {
-      lanState.pihole[key] = { ts, ok: false, error: e.message || String(e) }
-      console.error(`[lan] pihole ${key} failed:`, e.message || e)
-    }
-  }))
 }
 
-if (PIHOLE_HOSTS.length > 0 || process.env.LAN_SUBNET) {
+if (process.env.LAN_SUBNET) {
   setInterval(pollLan, LAN_POLL_INTERVAL_MS).unref()
   pollLan()
 }
