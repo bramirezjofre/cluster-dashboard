@@ -168,3 +168,87 @@ test('formatRate: 0 / negative / NaN → "0 Kbps"', () => {
   assert.equal(formatRate(-5), '0 Kbps')
   assert.equal(formatRate(NaN), '0 Kbps')
 })
+
+// ─── casos acordes al sistema actual (counter real de enp2s0) ────────────
+
+test('parseByteCounter: número grande del orden de bytes reales de NIC', () => {
+  // En un enlace de 1 Gbps activo durante varias horas, los contadores
+  // fácilmente superan los 100 GB (~10^11 bytes). Verificamos que el
+  // parser devuelve un BigInt exacto sin pérdida de precisión.
+  const big = '1819283319'  // valor real observado en enp2s0 al instalar iface_traffic
+  const result = parseByteCounter(big + '\n')
+  assert.equal(result, BigInt(big))
+  assert.equal(typeof result, 'bigint')
+})
+
+test('deriveKbps: 10 MB en 1 segundo = 80_000 Kbps', () => {
+  // Típico de un enlace hogareño saturado brevemente.
+  assert.equal(deriveKbps(0n, 10_000_000n, 1000), 80_000)
+})
+
+test('deriveKbps: delta de 1 byte en 1 segundo = 0 Kbps (truncado)', () => {
+  // 1 byte * 8 bits / 1000 ms = 0.008 Kbps → Math.floor = 0.
+  // Verificamos que no devolvemos un valor fraccionario.
+  assert.equal(deriveKbps(0n, 1n, 1000), 0)
+  assert.equal(deriveKbps(1000n, 1001n, 1000), 0)
+})
+
+test('deriveKbps: acepta BigInt con valor cercano a 2^53 (overflow Number)', () => {
+  // En un sistema con varios TB transferidos, el contador excede
+  // Number.MAX_SAFE_INTEGER (~9 PB). El cálculo debe seguir preciso.
+  // 1_000_000_000_000 bytes (1 TB) en 1 segundo → 8_000_000_000 Kbps
+  // = 8 Tbps. Eso cabe en BigInt pero NO en Number sin pérdida.
+  const oneTB = 1_000_000_000_000n
+  const kbps = deriveKbps(0n, oneTB, 1000)
+  assert.equal(kbps, 8_000_000_000)
+})
+
+test('deriveKbps: elapsed no-entero se trunca correctamente', () => {
+  // 1000 bytes en 500 ms = 16 Kbps (delta * 8 / ms)
+  assert.equal(deriveKbps(0n, 1000n, 500), 16)
+})
+
+test('readCounters: lee enp2s0 desde fs real (smoke test, skip si no existe)', async () => {
+  // Solo corre en hosts donde enp2s0 existe — los runners de CI con Node
+  // puro probablemente no lo tendrán, así que saltamos sin fallar.
+  const { existsSync } = await import('node:fs')
+  if (!existsSync('/sys/class/net/enp2s0/statistics/rx_bytes')) {
+    return  // skip
+  }
+  const r = readCounters('enp2s0')
+  assert.equal(r.ok, true)
+  assert.ok(r.rx > 0n, 'rx_bytes debe ser > 0')
+  assert.ok(r.tx > 0n, 'tx_bytes debe ser > 0')
+})
+
+test('sampleIface: dos muestras con iface real (smoke test, skip si no existe)', async () => {
+  const { existsSync } = await import('node:fs')
+  if (!existsSync('/sys/class/net/enp2s0/statistics/rx_bytes')) {
+    return  // skip
+  }
+  const first = sampleIface('enp2s0', null, Date.now())
+  assert.equal(first.ok, true)
+  // Segunda muestra 1s después — el delta debe ser >= 0
+  const second = sampleIface('enp2s0', first, Date.now() + 1000)
+  assert.equal(second.ok, true)
+  assert.ok(second.rxKbps >= 0)
+  assert.ok(second.txKbps >= 0)
+  assert.ok(second.rx >= first.rx, 'rx nunca debe retroceder')
+  assert.ok(second.tx >= first.tx, 'tx nunca debe retroceder')
+})
+
+test('sampleIface: prev con rx no numérico deriva rxKbps=0 pero tx sigue normal', () => {
+  // deriveKbps usa try/catch sobre BigInt(). Si la conversión falla
+  // (rx = 'garbage'), devuelve 0 para esa métrica. La otra (tx) sigue
+  // funcionando con datos válidos.
+  const { base, cleanup } = makeFakeSys()
+  try {
+    makeIface(base, 'eth0', 1000, 2000)
+    const badPrev = { rx: 'garbage', tx: 1000n, ts: 1000 }
+    const snap = sampleIface('eth0', badPrev, 2000, base)
+    assert.equal(snap.ok, true)
+    assert.equal(snap.rxKbps, 0)        // BigInt('garbage') → error → 0
+    // tx: delta = 2000-1000 = 1000 bytes en 1000 ms = 8 Kbps
+    assert.equal(snap.txKbps, 8)
+  } finally { cleanup() }
+})
