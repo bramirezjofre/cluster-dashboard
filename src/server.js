@@ -541,7 +541,7 @@ async function pollIfaceTraffic() {
       tx_kbps: snap.txKbps,
     }
     insertIfaceSample.run(IFACE, snap.ts, JSON.stringify(payload))
-    ifaceHistory.push({ ts: snap.ts, rx_kbps: snap.rxKbps, tx_kbps: snap.txKbps })
+    ringPush(ifaceHistory, { ts: snap.ts, rx_kbps: snap.rxKbps, tx_kbps: snap.txKbps })
   } else {
     console.error('[iface] sample failed:', snap.error)
   }
