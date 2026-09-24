@@ -25,7 +25,17 @@ COPY src/pihole.js      ./src/pihole.js
 COPY src/pihole.test.js ./src/pihole.test.js
 COPY src/arp.js         ./src/arp.js
 COPY src/arp.test.js    ./src/arp.test.js
+COPY src/iface_traffic.js    ./src/iface_traffic.js
+COPY src/iface_traffic.test.js ./src/iface_traffic.test.js
 
-# Run all tests under src/. `node --test` discovers *.test.js by itself.
-# --test-reporter=spec gives readable output in `docker run`.
-CMD ["node", "--test", "--test-reporter=spec", "src/pihole.test.js", "src/arp.test.js"]
+# Run all *.test.js files under src/. `node --test` discovers tests
+# when given a glob pattern. --test-reporter=spec gives readable output
+# in `docker run`. The shell expands the glob; if you invoke this image
+# with `docker run` directly you may need a shell (see entrypoint alt
+# below).
+CMD ["node", "--test", "--test-reporter=spec", "src/*.test.js"]
+
+# Alternative for direct `docker run` invocations that bypass the shell:
+# uncomment this line and comment the CMD above if you'd rather have
+# docker invoke a shell that expands the glob.
+# ENTRYPOINT ["sh", "-c", "node --test --test-reporter=spec 'src/*.test.js'"]
