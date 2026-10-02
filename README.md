@@ -37,14 +37,42 @@ container itself.
 
 The daemon also tracks what's happening on the local network:
 
-- **ARP scan** of `LAN_SUBNET` (default `192.168.1.0/24`) every
-  `LAN_POLL_INTERVAL_MS` (default 60s). Result is a table of IP + MAC
-  pairs for active hosts, shown in the "Dispositivos LAN" card.
+- **ARP scan + enrichment** of `LAN_SUBNET` (default `192.168.1.0/24`)
+  every `LAN_POLL_INTERVAL_MS` (default 60s). Result is a table of
+  IP + **Vendor (from MAC OUI)** + **Hostname (from mDNS/reverse DNS)**
+  + MAC for every active host, shown in the "Dispositivos LAN" card.
+  See [Enrichment](#enrichment-vendor--hostname) below for how those
+  fields are populated.
 - **Interface traffic** for the host's LAN-facing NIC (default
   `enp2s0`) every `IFACE_POLL_INTERVAL_MS` (default 30s). The
   daemon reads `/sys/class/net/<iface>/statistics/{rx,tx}_bytes` and
   derives Kbps from the delta. Shown in the "Tráfico LAN" card with
   a sparkline of the last 30 minutes.
+
+### Enrichment (vendor + hostname)
+
+After the ARP scan returns the raw `{ip, mac}` pairs, the daemon runs
+two parallel lookups per device before showing the result:
+
+1. **Vendor** (the MAC manufacturer, e.g. `Apple, Inc.`,
+   `Raspberry Pi Foundation`, `HUAWEI TECHNOLOGIES CO.,LTD`). Computed
+   locally from a 24-bit OUI table loaded at startup — no network
+   call. The OUI list ships in the image at
+   `/usr/share/ieee-data/oui.txt` (≈36 k prefixes). Devices with
+   randomized MACs (recent iOS / Android) show `—`.
+2. **Hostname** (mDNS / reverse DNS). Tries both in parallel:
+   - **mDNS** via `avahi-resolve -a <ip>` (800 ms timeout). Yields
+     names like `samsung-impresora.local` when the device advertises
+     itself over Bonjour / Avahi.
+   - **Reverse DNS** via `getent hosts <ip>` (1 s timeout). Yields
+     the DHCP-assigned hostname when the router/Pi-hole sets one.
+   First non-empty answer wins. When nothing returns, the field is
+   `—` (not an error).
+
+Devices are returned sorted by IP (octet-wise, so `192.168.1.10`
+sorts before `192.168.1.100`). The dashboard renders the top 40.
+Enrichment is parallelized at 16 devices at a time so even a full
+`/24` scan completes in ~1–2 s on top of the ARP scan.
 
 ### Configuring interface traffic
 
@@ -88,6 +116,18 @@ router uses a different range.
   ARP entry. A powered-off device disappears from the list until it
   comes back. The Samsung S20fe this dashboard runs on is a typical
   example — it appears only when awake.
+- **Vendor field**: comes from the IEEE OUI table, which only knows
+  the MAC prefix assigned to the manufacturer. Devices with MAC
+  randomization enabled (recent iOS / Android by default) show `—`
+  because the prefix isn't registered. Some Linux/IoT devices also
+  randomize on some networks. There is no way around this without
+  active fingerprinting, which the dashboard does not do.
+- **Hostname field**: depends on the device advertising itself (mDNS)
+  or the DHCP server setting a name (reverse DNS). Most Windows PCs
+  and many IoT devices do neither, so the field is often `—` even
+  when the device is right there on the network. When the field is
+  populated, it's usually the DHCP-assigned name (which is why
+  Pi-hole / a router with `dnsmasq` makes the field much richer).
 - Interface traffic reflects only what's flowing through the host's
   LAN NIC. Devices on a different physical segment (e.g. behind a
   separate AP) won't be visible.

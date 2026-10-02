@@ -130,10 +130,24 @@
   .lan-card:hover { border-color: var(--border); }
   .lan-card .muted { color: var(--label-2); font-size: 12px; margin: 4px 0 8px 0; }
   .lan-table { width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 12px; }
-  .lan-table td { padding: 4px 8px; border-bottom: 1px solid var(--border); }
-  .lan-table td:nth-child(2) { color: var(--label-2); }
+  .lan-table td { padding: 4px 8px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  .lan-table td.lan-ip { color: var(--acc); }
+  .lan-table td.lan-vendor { color: var(--label-2); }
+  .lan-table td.lan-hostname { color: var(--label-1); }
+  .lan-table td.lan-hostname.empty { color: var(--label-2); }
+  .lan-table td.lan-mac { color: var(--label-2); font-size: 0.95em; }
   .lan-table td.num { text-align: right; color: var(--acc); }
   .lan-table tr:last-child td { border-bottom: none; }
+  .lan-table th {
+    text-align: left;
+    padding: 4px 8px;
+    border-bottom: 1px solid var(--border);
+    color: var(--label-2);
+    font-weight: 600;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
   .log-box {
     background: #0a0c10; border: 1px solid var(--border); border-radius: 8px;
     padding: 12px 14px; font-family: var(--mono); font-size: 12px; line-height: 1.55;
@@ -453,10 +467,29 @@ async function refreshLan() {
     if (!arp.devices || !arp.devices.length) {
       list.innerHTML = '<em>sin dispositivos detectados</em>'
     } else {
+      // Columns: IP · Vendor · Hostname · MAC. Backend already sorts
+      // by IP. We render the table head once and then rows in the
+      // server-given order (we don't re-sort on the client).
       list.innerHTML = '<table class="lan-table">' +
-        arp.devices.slice(0, 40).map(d =>
-          `<tr><td>${escHtml(d.ip)}</td><td>${escHtml(d.mac || '—')}</td></tr>`
-        ).join('') + '</table>'
+        '<thead><tr>' +
+        '<th>IP</th><th>Vendor</th><th>Hostname</th><th>MAC</th>' +
+        '</tr></thead><tbody>' +
+        arp.devices.slice(0, 40).map(d => {
+          const vendor = d.vendor ? escHtml(d.vendor) : '<span style="color:var(--label-2)">—</span>'
+          const hostname = d.hostname
+            ? `<strong>${escHtml(d.hostname)}</strong>`
+            : '<span style="color:var(--label-2)">—</span>'
+          const mac = d.mac ? escHtml(d.mac) : '—'
+          return (
+            `<tr>` +
+            `<td class="lan-ip">${escHtml(d.ip)}</td>` +
+            `<td class="lan-vendor">${vendor}</td>` +
+            `<td class="lan-hostname">${hostname}</td>` +
+            `<td class="lan-mac">${mac}</td>` +
+            `</tr>`
+          )
+        }).join('') +
+        '</tbody></table>'
     }
   } catch (e) {
     console.warn('refreshLan failed:', e)

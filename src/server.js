@@ -23,6 +23,7 @@ import { fileURLToPath } from 'node:url'
 import { Client } from 'ssh2'
 import Database from 'better-sqlite3'
 import { arpScan } from './arp.js'
+import { enrichDevices } from './lan_enrich.js'
 import { sampleIface } from './iface_traffic.js'
 import { check as checkAlerts } from './notifier.js'
 
@@ -482,9 +483,14 @@ const lanState = {
 
 async function pollLan() {
   const ts = Date.now()
-  // ARP scan
+  // ARP scan + enrichment (vendor / hostname lookups in parallel).
   try {
-    const devices = await arpScan({ subnet: LAN_SUBNET })
+    const raw = await arpScan({ subnet: LAN_SUBNET })
+    const devices = await enrichDevices(raw, {
+      mdnsTimeoutMs: 800,
+      dnsTimeoutMs: 1000,
+      concurrency: 16,
+    })
     lanState.arp = { ts, devices }
     insertLanSample.run('arp', ts, JSON.stringify(devices))
   } catch (e) {

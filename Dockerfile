@@ -10,7 +10,10 @@ WORKDIR /app
 
 # gosu lets the entrypoint drop privileges from root to the non-root
 # user after fixing up volume permissions. Tiny static binary (~1.5 MB).
-RUN apk add --no-cache gosu
+# avahi-tools gives us `avahi-resolve` for mDNS lookups (used by
+# lan_enrich.js to resolve friendly hostnames like "impresora.local").
+# dnsutils gives us `getent`/`nslookup` for reverse-DNS fallbacks.
+RUN apk add --no-cache gosu avahi-tools dnsutils
 
 # Install only what's needed for runtime; no dev deps in the image.
 COPY package.json package-lock.json* ./
