@@ -12,8 +12,10 @@ WORKDIR /app
 # user after fixing up volume permissions. Tiny static binary (~1.5 MB).
 # avahi-tools gives us `avahi-resolve` for mDNS lookups (used by
 # lan_enrich.js to resolve friendly hostnames like "impresora.local").
-# dnsutils gives us `getent`/`nslookup` for reverse-DNS fallbacks.
-RUN apk add --no-cache gosu avahi-tools dnsutils
+# bind-tools gives us `getent`/`nslookup`/`dig` for reverse-DNS
+# fallbacks. The IEEE OUI database is bundled at /app/assets/oui.txt
+# (see COPY below), so wireshark isn't pulled in.
+RUN apk add --no-cache gosu avahi-tools bind-tools
 
 # Install only what's needed for runtime; no dev deps in the image.
 COPY package.json package-lock.json* ./
@@ -21,6 +23,10 @@ RUN npm install --omit=dev --no-audit --no-fund
 
 COPY src ./src
 COPY public ./public
+# Bundled IEEE OUI database — maps a 24-bit MAC prefix to the vendor name.
+# ~5.6 MB compressed, used by lan_enrich.js. Keeping it in the image avoids
+# a runtime download and removes the need to install wireshark.
+COPY assets ./assets
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
 

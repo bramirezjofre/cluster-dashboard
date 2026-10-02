@@ -39,10 +39,15 @@ export { parseNeighOutput } from './arp.js'
 
 // OUI file location. We try the Wireshark manuf file first (compact
 // and trimmed), then the IEEE oui.txt files that ship with the
-// ieee-data package on Debian/Ubuntu (heavier, but ubiquitous). If
-// none is found, vendor resolution silently returns "" — the rest
-// of the data still works (hostnames via mDNS/reverse DNS).
+// ieee-data package on Debian/Ubuntu (heavier, but ubiquitous).
+// Finally, a copy bundled with this project at /app/assets/oui.txt
+// (~5.6 MB, ≈36 k entries) is checked — this is the path used in
+// the Docker image, where neither wireshark nor ieee-data are
+// installed. If none is found, vendor resolution silently returns
+// "" — the rest of the data still works (hostnames via
+// mDNS/reverse DNS).
 const OUI_PATHS = [
+  '/app/assets/oui.txt',
   '/usr/share/wireshark/manuf',
   '/usr/share/ieee-data/oui.txt',
   '/var/lib/ieee-data/oui.txt',
