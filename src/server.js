@@ -37,13 +37,33 @@ import { check as checkAlerts } from './notifier.js'
 import { dirname as pathDirname } from 'node:path'
 const __dirname = resolve(pathDirname(fileURLToPath(import.meta.url)), '..')
 
+// --- process-level safety net ------------------------------------------------
+// A rejected promise or an uncaught throw in a callback (e.g. an ssh2
+// stream erroring after the connection was torn down) terminates the
+// process by default. For a polling daemon that means the container
+// restarts and the history has a hole. Log and keep running: the poll
+// loop is already defensive, so an isolated failure should cost one
+// sample, not the whole daemon.
+process.on('unhandledRejection', (reason) => {
+  console.error('[unhandledRejection]', reason?.stack || reason)
+})
+process.on('uncaughtException', (err) => {
+  console.error('[uncaughtException]', err?.stack || err)
+})
+
 // --- config -----------------------------------------------------------------
 
 const PORT = +(process.env.PORT || 9090)
 const POLL_INTERVAL_MS = +(process.env.POLL_INTERVAL_MS || 30_000)
 const HISTORY_SAMPLES = +(process.env.HISTORY_SAMPLES || 120)
-const SSH_CONNECT_TIMEOUT_MS = +(process.env.SSH_CONNECT_TIMEOUT_MS || 5_000)
-const SSH_CMD_TIMEOUT_MS = +(process.env.SSH_CMD_TIMEOUT_MS || 4_000)
+// The command timeout must be >= the connect timeout. A shorter command
+// timeout makes the connect timer fire first and tear the connection down
+// mid-handshake, which is what produced the "operation aborted due to
+// timeout" errors in the log and the ssh2 stream errors that crashed the
+// daemon. The compose file sets the same values; these are the defaults
+// for running the daemon outside compose.
+const SSH_CONNECT_TIMEOUT_MS = +(process.env.SSH_CONNECT_TIMEOUT_MS || 8_000)
+const SSH_CMD_TIMEOUT_MS = +(process.env.SSH_CMD_TIMEOUT_MS || 10_000)
 const SSH_USER = process.env.SSH_USER || 'bramirezj'
 const SSH_KEYS_DIR = process.env.SSH_KEYS_DIR || '/home/bramirezj/.ssh'
 const SERVERS = (process.env.CLUSTER_SERVERS || 'server-11,server-17,server-18,server-19')
@@ -339,6 +359,20 @@ function runSshCommand(alias, script, timeoutMs = SSH_CMD_TIMEOUT_MS) {
         }, timeoutMs)
         stream.on('data', d => { out += d.toString('utf8') })
         stream.stderr.on('data', d => { errOut += d.toString('utf8') })
+        // A stream that emits 'error' with no listener throws it as an
+        // uncaught exception, which kills the process. The timeout path
+        // above calls conn.destroy() while this stream is still live, so
+        // ssh2 can emit 'error' here afterwards. Both streams get a
+        // handler; the connection's own 'error' listener does not cover
+        // errors raised on the exec stream.
+        stream.on('error', (err) => {
+          clearTimeout(cmdT)
+          done({ ok: false, error: err.message, partial: out })
+        })
+        stream.stderr.on('error', (err) => {
+          clearTimeout(cmdT)
+          done({ ok: false, error: err.message, partial: out })
+        })
         stream.on('close', (code) => {
           clearTimeout(cmdT)
           if (code !== 0) return done({ ok: false, error: `exit ${code}`, stderr: errOut.slice(0, 500), partial: out })
