@@ -1,11 +1,21 @@
 # cluster-dashboard — slim Node image, ~80 MB final.
+#
+# Node 24 (not 22): the runtime under node 22 crashed with SIGSEGV in V8's
+# generational GC (cppgc::Sweeper::PerformSweepOnMutatorThread) and in a
+# python3.14 worker of the same host. The crash offsets varied between runs,
+# which points at heap corruption rather than a fixed code path. Node 24 ships
+# V8 13.6 against node 22's V8 12.4.
+#
+# better-sqlite3 must be >= 13: version 11.x has no prebuild for node 24 and
+# falls back to a source build, which fails in this image (no python for
+# node-gyp). 13.x ships a prebuild and installs in seconds.
 # No SSH client or keys baked in: identity files are bind-mounted from the
 # host at /home/<user>/.ssh so they never enter the image or any registry.
 # Build with BuildKit for faster npm install cache reuse:
 #   DOCKER_BUILDKIT=1 docker build -t cluster-dashboard .
 # or use docker compose build (BuildKit is on by default in recent Docker).
 
-FROM node:22-alpine
+FROM node:24-alpine
 WORKDIR /app
 
 # gosu lets the entrypoint drop privileges from root to the non-root
@@ -18,8 +28,15 @@ WORKDIR /app
 RUN apk add --no-cache gosu avahi-tools bind-tools
 
 # Install only what's needed for runtime; no dev deps in the image.
+#
+# --ignore-scripts: better-sqlite3 >= 13 ships its native binding as a
+# NAPI prebuild (prebuilds/linuxmusl-x64.node) inside the npm tarball.
+# NAPI is ABI-stable, so the prebuild works on any node 24 without
+# compiling. The package's install script would try to run node-gyp
+# anyway, which fails here: this image has no python for node-gyp.
+# With --ignore-scripts the prebuild is used as-is.
 COPY package.json package-lock.json* ./
-RUN npm install --omit=dev --no-audit --no-fund
+RUN npm install --omit=dev --no-audit --no-fund --ignore-scripts
 
 COPY src ./src
 COPY public ./public
