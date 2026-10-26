@@ -17,11 +17,9 @@ container itself.
 - Keeps a ring buffer of the last `HISTORY_SAMPLES` samples (default 120
   = 1h at 30s) per metric, per server, in memory
 - Serves the dashboard HTML and a JSON snapshot from `/api/cluster/status`
-- Polls the local LAN via ARP scan and reads host NIC byte counters
-  (rx/tx Kbps) so we can see traffic flowing through the host's LAN
-  interface (see "LAN monitoring" below). Available at
-  `/api/lan/status`, `/api/lan/history`, `/api/iface/status`, and
-  `/api/iface/history`.
+- Stores long-term history in SQLite (inside the `cluster-dashboard-data`
+  volume) so it survives container restarts. Uses Node's built-in
+  `node:sqlite`, so the daemon loads **no native addon** at all
 
 ## What it does NOT do
 
@@ -33,114 +31,75 @@ container itself.
 - It does not persist history to disk. A restart loses the ring buffer;
   that's intentional for a single-host dashboard.
 
-## LAN monitoring
+## LAN monitoring (removed on 2026-10-26)
 
-The daemon also tracks what's happening on the local network:
+The dashboard used to have a second panel that tracked the local network:
+an **ARP scan** of `LAN_SUBNET` with **vendor** (MAC OUI) and **hostname**
+(mDNS / reverse DNS) enrichment for every device found, plus
+**interface traffic** counters (rx/tx Kbps) for the host's LAN NIC.
 
-- **ARP scan + enrichment** of `LAN_SUBNET` (default `192.168.1.0/24`)
-  every `LAN_POLL_INTERVAL_MS` (default 60s). Result is a table of
-  IP + **Vendor (from MAC OUI)** + **Hostname (from mDNS/reverse DNS)**
-  + MAC for every active host, shown in the "Dispositivos LAN" card.
-  See [Enrichment](#enrichment-vendor--hostname) below for how those
-  fields are populated.
-- **Interface traffic** for the host's LAN-facing NIC (default
-  `enp2s0`) every `IFACE_POLL_INTERVAL_MS` (default 30s). The
-  daemon reads `/sys/class/net/<iface>/statistics/{rx,tx}_bytes` and
-  derives Kbps from the delta. Shown in the "Tráfico LAN" card with
-  a sparkline of the last 30 minutes.
+**That feature has been removed.** It was the trigger for a crash that
+killed the daemon with SIGSEGV / "general protection fault" (exit 139) up
+to ~20 times a day, always inside V8's hash-table / GC internals with a
+corrupted pointer. The full evidence trail is in
+[`docs/crash-diagnosis.md`](docs/crash-diagnosis.md); the short version:
 
-### Enrichment (vendor + hostname)
+- The OUI table (5.6 MB, 35 813 prefixes) was re-parsed into a fresh
+  35 813-entry `Map` **and** a 35 813-entry `Set` on *every* 60 s poll.
+  The recurring crash sites were precisely the V8 builtins that workload
+  exercises: `Builtins_MapPrototypeSet`, `Builtins_FindOrderedHashSetEntry`,
+  `Object::GetSimpleHash` and `Scavenger::ScavengePage`.
+- On top of that the daemon forked ~300 child processes per minute
+  (254 `ping` calls for the ARP sweep, ~52 `avahi-resolve`/`dig`/`getent`
+  lookups).
+- It reproduced on node 22, 24 and 26, on musl and glibc, in the
+  container and natively on the host — so it was not a runtime-version
+  bug, not a libc bug, and not the overclock.
 
-After the ARP scan returns the raw `{ip, mac}` pairs, the daemon runs
-two parallel lookups per device before showing the result:
+The owner authorised dropping the network functionality outright
+("*si es necesario quitar la funcionalidad de red y solo esten los
+servidores, que lo haga*"). The daemon is now **SSH-only**: the five
+servers over SSH are the core feature and they are untouched.
 
-1. **Vendor** (the MAC manufacturer, e.g. `Apple, Inc.`,
-   `Raspberry Pi Foundation`, `HUAWEI TECHNOLOGIES CO.,LTD`). Computed
-   locally from a 24-bit OUI table loaded at startup — no network
-   call. The OUI list ships in the image at
-   `/usr/share/ieee-data/oui.txt` (≈36 k prefixes). Devices with
-   randomized MACs (recent iOS / Android) show `—`.
-2. **Hostname** (mDNS / reverse DNS). Tries both in parallel:
-   - **mDNS** via `avahi-resolve -a <ip>` (800 ms timeout). Yields
-     names like `samsung-impresora.local` when the device advertises
-     itself over Bonjour / Avahi.
-   - **Reverse DNS** via `getent hosts <ip>` (1 s timeout). Yields
-     the DHCP-assigned hostname when the router/Pi-hole sets one.
-   First non-empty answer wins. When nothing returns, the field is
-   `—` (not an error).
+### What was lost
 
-Devices are returned sorted by IP (octet-wise, so `192.168.1.10`
-sorts before `192.168.1.100`). The dashboard renders the top 40.
-Enrichment is parallelized at 16 devices at a time so even a full
-`/24` scan completes in ~1–2 s on top of the ARP scan.
+| Removed | Consequence |
+|---|---|
+| "Dispositivos LAN" card | No list of active LAN hosts, their MACs, vendors or hostnames |
+| "Tráfico LAN" card | No rx/tx Kbps sparkline for the host's LAN NIC |
+| `/api/lan/status`, `/api/lan/history` | Endpoints removed |
+| `/api/iface/status`, `/api/iface/history` | Endpoints removed |
+| `LAN_SUBNET`, `IFACE`, `IFACE_POLL_INTERVAL_MS`, `IFACE_HISTORY_SAMPLES` | Env vars removed from `docker-compose.yml` |
+| `src/arp.js`, `src/lan_enrich.js`, `src/iface_traffic.js` | Source modules deleted |
+| `assets/oui.txt` (5.6 MB) | IEEE OUI database no longer shipped in the image |
 
-### Configuring interface traffic
+The SQLite database keeps its `lan_samples` and `iface_samples` tables in
+older volumes; the daemon simply stops writing to them.
 
-The "Tráfico LAN" card shows real-time RX/TX Kbps on the host's LAN
-interface by reading `/sys/class/net/<iface>/statistics/{rx,tx}_bytes`
-every `IFACE_POLL_INTERVAL_MS` (default 30s) and deriving Kbps from
-the delta. Total bytes since boot is also shown.
+### If you want it back
 
-**Required:** the container must run with `network_mode: host` (set in
-`docker-compose.yml`) so it can read host counters. If you see only
-docker bridge traffic, verify the `network_mode: host` line is present.
+Do **not** bring it back the way it was. The per-poll rebuild of a
+35 k-entry `Map`/`Set` is what crashed the daemon, and the fork-per-
+address sweep is what turned it into a fork storm. If the LAN panel is
+ever wanted again:
 
-Override defaults via `.env`:
+1. Parse the OUI table **once** at startup and keep the `Map` in memory.
+   Never rebuild it per poll.
+2. Use a single batched `ip neigh` read instead of pinging all 254
+   addresses, and do the name lookups with one bounded worker pool
+   instead of two forks per device.
+3. Keep the whole thing off the critical path: the SSH polling is the
+   feature that matters, and it must never share a process with a
+   workload that can corrupt the heap.
 
-```ini
-IFACE=enp2s0              # LAN-facing NIC. 'eth0' on Raspberry Pi hosts.
-IFACE_POLL_INTERVAL_MS=30000
-IFACE_HISTORY_SAMPLES=1440  # in-memory ring buffer; long-term lives in SQLite.
-```
-
-### Configuring the ARP subnet
-
-`LAN_SUBNET` (default `192.168.1.0/24`) is the subnet the ARP scanner
-pings to populate the "Dispositivos LAN" card. Override if your ISP
-router uses a different range.
-
-### Endpoints
-
-- `GET /api/lan/status` — current snapshot: `{ arp: { ts, devices[] },
-  lastError: string|null }`
-- `GET /api/lan/history?source=arp&from=<ms>&to=<ms>&limit=<n>` —
-  historical ARP samples (default: last 24h, max 5000 rows)
-- `GET /api/iface/status` — current iface counters: `{ iface, ts,
-  rxBytes, txBytes, rxKbps, txKbps, ok, error }`
-- `GET /api/iface/history?from=<ms>&to=<ms>&limit=<n>` — historical
-  samples for the default interface
-
-### Caveats
-
-- ARP scan only sees devices that respond to ping or have an existing
-  ARP entry. A powered-off device disappears from the list until it
-  comes back. The Samsung S20fe this dashboard runs on is a typical
-  example — it appears only when awake.
-- **Vendor field**: comes from the IEEE OUI table, which only knows
-  the MAC prefix assigned to the manufacturer. Devices with MAC
-  randomization enabled (recent iOS / Android by default) show `—`
-  because the prefix isn't registered. Some Linux/IoT devices also
-  randomize on some networks. There is no way around this without
-  active fingerprinting, which the dashboard does not do.
-- **Hostname field**: depends on the device advertising itself (mDNS)
-  or the DHCP server setting a name (reverse DNS). Most Windows PCs
-  and many IoT devices do neither, so the field is often `—` even
-  when the device is right there on the network. When the field is
-  populated, it's usually the DHCP-assigned name (which is why
-  Pi-hole / a router with `dnsmasq` makes the field much richer).
-- Interface traffic reflects only what's flowing through the host's
-  LAN NIC. Devices on a different physical segment (e.g. behind a
-  separate AP) won't be visible.
-- The container runs with `network_mode: host` so the ARP scan can
-  reach the LAN. Without it the container only sees its own docker
-  bridge subnet (172.x).
+`src/lan-removal.test.js` asserts the current shape so the LAN workload
+cannot creep back in unnoticed.
 
 ## Tests
 
 A standalone test image (`Dockerfile.test`) runs the unit tests on
-Node 22-alpine, which avoids polluting the host's `node_modules` and
-sidesteps the better-sqlite3 native build issue some Node versions
-have:
+Node 26-alpine, which avoids polluting the host's `node_modules` and
+matches the runtime version used in production:
 
 ```bash
 docker build -f Dockerfile.test -t cluster-dashboard-test .
@@ -154,18 +113,28 @@ start it:
 docker compose run --rm test
 ```
 
-The test suite currently covers `src/arp.js` (ARP cache parsing) and
-`src/iface_traffic.js` (byte counter parser, Kbps derivation, sample
-function). Tests use `node --test`, no extra dependencies.
+The test suite currently covers:
+
+- `src/ssh-error-handling.test.js` — the ssh2 stream-error regression:
+  a late `error` on an exec stream must not kill the daemon.
+- `src/lan-removal.test.js` — the LAN subsystem stays out: no `arp.js` /
+  `lan_enrich.js` / `iface_traffic.js` imports, no `child_process`, no
+  LAN env vars or API endpoints, no OUI table, and no native addon
+  (`node:sqlite` instead of `better-sqlite3`).
+
+Tests use `node --test`, no extra dependencies.
 
 ## Layout
 
 ```
 cluster-dashboard/
 ├── Dockerfile
+├── Dockerfile.test
 ├── docker-compose.yml
 ├── package.json
+├── docs/crash-diagnosis.md  # why the LAN panel was removed (SIGSEGV)
 ├── src/server.js          # daemon: ssh poll loop + JSON API + static serve
+├── src/notifier.js        # telegram alerts
 └── public/index.html      # frontend: cards + sparklines + auto-refresh
 ```
 
@@ -176,8 +145,8 @@ cluster-dashboard/
 | `PORT` | 9090 | HTTP listen port inside the container |
 | `POLL_INTERVAL_MS` | 30000 | How often to SSH every server |
 | `HISTORY_SAMPLES` | 120 | Ring buffer depth per metric (~1h at 30s) |
-| `SSH_CONNECT_TIMEOUT_MS` | 5000 | TCP+handshake deadline |
-| `SSH_CMD_TIMEOUT_MS` | 4000 | Per-exec deadline |
+| `SSH_CONNECT_TIMEOUT_MS` | 8000 | TCP+handshake deadline |
+| `SSH_CMD_TIMEOUT_MS` | 10000 | Per-exec deadline (must be >= connect timeout) |
 | `SSH_USER` | bramirezj | Fallback user when `~/.ssh/config` doesn't set one |
 | `SSH_KEYS_DIR` | `/home/bramirezj/.ssh` | Where to read `config` + private keys |
 | `CLUSTER_SERVERS` | `server-11,server-17,server-18,server-19` | Comma-separated Host aliases |

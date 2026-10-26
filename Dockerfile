@@ -12,21 +12,15 @@
 #
 # Two runtimes with completely different GC implementations (V8 12.4 and
 # 13.6) failed the same way, so the runtime version was not the variable.
-# Two further observations pointed at musl:
-#   - the same daemon run natively on the host (node 26.8.1, glibc) did
-#     not crash
-#   - the same daemon under gdb did not crash (timing-sensitive)
 #
-# musl ships its own allocator, with different behaviour under
-# fragmentation and fork() from a large heap. The daemon forks 32
-# concurrent `ping` processes every 60s (ARP scan) while also running
-# five SSH sessions with curve25519 key exchange, which is exactly the
-# workload that stresses the allocator.
-#
-# This image therefore uses glibc (Debian slim) and node 26 — the same
-# combination that was observed to hold steady natively. The overclock
+# This image therefore uses glibc (Debian slim) and node 26. The overclock
 # stays untouched: the crash was reproducible on stock-frequency hardware
 # too, so the clock was never the cause.
+#
+# NOTE: the crash was ultimately traced to the LAN monitoring workload, not
+# to the runtime or the libc — see docs/crash-diagnosis.md. The LAN
+# subsystem has been removed from the daemon, so this image no longer needs
+# any of the network helper packages either.
 #
 # better-sqlite3 must be >= 13: version 11.x has no prebuild for node 26
 # and falls back to a source build, which fails in this image (no python
@@ -42,20 +36,14 @@ WORKDIR /app
 
 # gosu lets the entrypoint drop privileges from root to the non-root
 # user after fixing up volume permissions.
-# iputils-ping + iproute2 give the LAN scanner its `ping` and `ip` binaries.
-# avahi-daemon + avahi-utils give `avahi-resolve` for mDNS lookups (used by
-# lan_enrich.js to resolve friendly hostnames like "impresora.local").
-# bind9-dnsutils gives `dig`/`nslookup` for reverse-DNS fallbacks.
-# The IEEE OUI database is bundled at /app/assets/oui.txt (see COPY below),
-# so wireshark isn't pulled in.
+#
+# No ping / iproute2 / avahi / bind9-dnsutils here any more: they existed
+# only for the LAN scanner (ARP sweep, mDNS + reverse-DNS lookups) that
+# was removed on 2026-10-26. Dropping them also removes the fork-heavy
+# workload that triggered the daemon's SIGSEGV.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       gosu \
-      iputils-ping \
-      iproute2 \
-      avahi-daemon \
-      avahi-utils \
-      bind9-dnsutils \
  && rm -rf /var/lib/apt/lists/*
 
 # Install only what's needed for runtime; no dev deps in the image.
@@ -71,10 +59,6 @@ RUN npm install --omit=dev --no-audit --no-fund --ignore-scripts
 
 COPY src ./src
 COPY public ./public
-# Bundled IEEE OUI database — maps a 24-bit MAC prefix to the vendor name.
-# ~5.6 MB compressed, used by lan_enrich.js. Keeping it in the image avoids
-# a runtime download and removes the need to install wireshark.
-COPY assets ./assets
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
 

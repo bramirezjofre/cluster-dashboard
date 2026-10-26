@@ -1,35 +1,31 @@
 # cluster-dashboard — test image.
 #
 # Standalone image that runs the unit tests in src/*.test.js with
-# `node --test`. Doesn't need better-sqlite3 or any other runtime deps
-# (the test files only import the arp.js and iface_traffic.js modules,
-# which are pure ESM with no native bindings).
+# `node --test`. It doesn't need any runtime deps (the test files only
+# read src/server.js as text and assert on its wiring, not on runtime
+# behaviour).
 #
 # Build:    docker build -f Dockerfile.test -t cluster-dashboard-test .
 # Run:      docker run --rm cluster-dashboard-test
 # Or once:  docker run --rm cluster-dashboard-test && echo OK
-#
-# Why this exists: the host has Node 26 globally, but better-sqlite3
-# (a runtime dep, not needed for tests) only ships prebuilds for Node
-# 22 LTS and refuses to build from source on Node 26. The test suite
-# is independent of better-sqlite3, so we use Node 22 here and skip
-# the runtime deps.
 
-FROM node:22-alpine
+FROM node:26-alpine
 
 WORKDIR /app
 
 # Only the test files and the modules they cover are needed.
 # No package.json, no npm install, no native deps.
-COPY src/arp.js         ./src/arp.js
-COPY src/arp.test.js    ./src/arp.test.js
-COPY src/iface_traffic.js    ./src/iface_traffic.js
-COPY src/iface_traffic.test.js ./src/iface_traffic.test.js
+#
+# The LAN scanner modules (arp.js, lan_enrich.js, iface_traffic.js) were
+# deleted on 2026-10-26 along with the LAN feature that triggered the
+# daemon's SIGSEGV; src/lan-removal.test.js locks that in.
+#
 # Regression test for the ssh2 stream-error crash. It reads src/server.js
 # as text (it asserts on the handler wiring, not on runtime behaviour),
 # so server.js has to be copied in too.
-COPY src/server.js      ./src/server.js
+COPY src/server.js                 ./src/server.js
 COPY src/ssh-error-handling.test.js ./src/ssh-error-handling.test.js
+COPY src/lan-removal.test.js       ./src/lan-removal.test.js
 
 # Run all *.test.js files under src/. `node --test` discovers tests
 # when given a glob pattern. --test-reporter=spec gives readable output

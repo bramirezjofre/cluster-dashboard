@@ -13,10 +13,15 @@ name: cluster-dashboard
 # attached). To drop one, remove it from the env var and recreate the
 # container.
 #
-# LAN monitoring: the daemon also polls the local LAN via ARP scan and
-# reads host NIC byte counters (rx/tx Kbps) so we can see the traffic
-# flowing through the host's LAN interface even when the ISP router
-# blocks DNS changes or SNMP.
+# LAN monitoring was removed on 2026-10-26. The daemon used to poll the
+# local LAN via ARP scan (254 `ping` forks per cycle) and read host NIC
+# byte counters, and it re-parsed a 5.6 MB IEEE OUI table into a
+# 35 813-entry Map + Set on every cycle. That workload triggered a
+# SIGSEGV / "general protection fault" in V8's hash-table and GC internals
+# that killed the daemon up to ~20 times a day; see
+# docs/crash-diagnosis.md for the full evidence. The daemon is now
+# SSH-only. The env vars that used to configure it (LAN_SUBNET, IFACE,
+# IFACE_POLL_INTERVAL_MS, IFACE_HISTORY_SAMPLES) are gone with it.
 
 services:
   dashboard:
@@ -31,10 +36,10 @@ services:
       # trust. If you want to expose it beyond the LAN, put it behind
       # Nginx Proxy Manager with auth — see README.
       - "9090:9090"
-    # Run in the host network namespace so ARP scans reach the LAN that
-    # the host is on (otherwise the container only sees its own docker
-    # bridge subnet). Port mapping above still works because we bind
-    # 9090 directly on the host.
+    # Run in the host network namespace so the daemon reaches the polled
+    # servers on the LAN directly, with the host's own source address.
+    # Port mapping above still works because we bind 9090 directly on
+    # the host.
     network_mode: host
     environment:
       PORT: "9090"
@@ -55,13 +60,6 @@ services:
       ALERT_TELEGRAM_CHAT_ID: ${ALERT_TELEGRAM_CHAT_ID}
       ALERT_DISK_THRESHOLD: "65"
       ALERT_COOLDOWN_MIN: "60"
-      # LAN monitoring — host network interface for traffic counters.
-      # Default enp2s0 is the LAN NIC on the host. Set to 'eth0' on
-      # Raspberry Pi hosts.
-      IFACE: "enp2s0"
-      IFACE_POLL_INTERVAL_MS: "30000"
-      IFACE_HISTORY_SAMPLES: "1440"
-      LAN_SUBNET: "192.168.1.0/24"
     volumes:
       - /home/bramirezj/.ssh:/home/bramirezj/.ssh:ro
       # The .env file holds secrets (telegram bot token, chat id). Compose
