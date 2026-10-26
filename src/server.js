@@ -523,7 +523,12 @@ async function pollLan() {
     const devices = await enrichDevices(raw, {
       mdnsTimeoutMs: 800,
       dnsTimeoutMs: 1000,
-      concurrency: 16,
+      // 16 was the original value. Each device costs two forks
+      // (avahi-resolve, then dig/nslookup as fallback), so 16 meant up to
+      // 32 lookups in flight on top of the ping sweep. 6 keeps the
+      // enrichment quick while staying a small number of concurrent
+      // children on a 2-core host.
+      concurrency: 6,
     })
     lanState.arp = { ts, devices }
     insertLanSample.run('arp', ts, JSON.stringify(devices))

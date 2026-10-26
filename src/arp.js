@@ -41,7 +41,26 @@ async function pingOne(base, last, timeoutMs) {
   } catch { /* ping returns non-zero when host is down; that's fine */ }
 }
 
-export async function arpScan({ subnet = '192.168.0.0/24', timeoutMs = 3000, batchSize = 32 } = {}) {
+// Batch size for the ping sweep.
+//
+// 32 was the original value, and it meant 32 concurrent `ping` processes
+// on a 2-core host. Combined with the ~26 avahi-resolve/dig lookups that
+// lan_enrich then spawns for the discovered hosts, and five concurrent
+// SSH sessions, the daemon was forking ~300 child processes per minute.
+// The host's load average reached 4.85.
+//
+// The daemon was also crashing with SIGSEGV / general protection fault
+// roughly 20 times a day, always with a corrupted code pointer and a
+// different fault offset each time. Dropping the process pressure is
+// the cheapest lever on that: fork storms are the classic way to expose
+// a latent allocator or kernel bug.
+//
+// 8 keeps the sweep fast (254 addresses in 32 batches) while cutting
+// the concurrent process count to a quarter. The scan still completes in
+// well under the 60s poll interval.
+const DEFAULT_BATCH_SIZE = 8
+
+export async function arpScan({ subnet = '192.168.0.0/24', timeoutMs = 3000, batchSize = DEFAULT_BATCH_SIZE } = {}) {
   const { base, start, end } = subnetToRange(subnet)
   // Best-effort flush; ignore failure (needs root or net_admin).
   await execFileP('ip', ['neigh', 'flush', 'all']).catch(() => {})
