@@ -55,8 +55,24 @@ MITIGACIÓN APLICADA
 cron y elimina la concurrencia que dispara la corrupción. Los dos jobs son
 scripts no_agent, así que serializarlos no cuesta nada.
 
-El fix de raíz (bajar la RAM a 1600 MT/s) requiere autorización explícita de
-Berna y NO se ha aplicado: el OC se mantiene intacto por decisión suya.
+El fix de raíz (bajar la RAM a 1600 MT/s) NO se ha aplicado: el 2026-11-01
+Berna decidió explícitamente mantener el OC (CPU 3196 MHz, RAM 1872 MT/s).
+La mitigación por software es, por tanto, la solución definitiva y no un
+parche temporal. Si algún día reaparece un crash por corrupción de RAM, la
+primera hipótesis debe ser "el OC volvió a manifestarse bajo más carga", no
+"falta el fix de raíz".
+
+Defensas adicionales ya en pie:
+  - hermes-gateway.service: Restart=always + RestartSec=5 + StartLimitIntervalSec=0
+    -> systemd levanta el gateway indefinidamente si la corrupción lo mata.
+  - El dashboard ya no carga la monitorización LAN (ningún fork de ping, ningún
+    Map de 36k entradas por minuto), que era la carga que más castigaba la RAM.
+  - El watcher filtra por binario: un trap de python3 ya no se reporta como
+    crash del dashboard, y usa deltas para no repetir eventos históricos.
+
+LIMITACIÓN CONOCIDA: esta mitigación acota el riesgo, no lo elimina. Si el
+gateway o el dashboard desarrollan suficiente concurrencia, la corrupción puede
+reaparecer. Con el OC mantenida, ése es el techo de la solución disponible.
 """
 from __future__ import annotations
 
