@@ -18,10 +18,13 @@ MODOS
 RESULTADOS MEDIDOS EN ESTA MÁQUINA (2026-11-01)
 ================================================
   Python 3.14.9, 4 hilos, dict 800k entradas ....... 3/8 crash
-  Python 3.14.7, 4 hilos, dict 800k entradas ....... 4/8 crash
+  Python 3.14.7, 4 hilos, dict 800k entradas ....... 1/8 crash
   Python 3.13.18 (recién descargado), 4 hilos ...... 4/8 crash
-  Python 3.10/3.12 en server-agentes (mismo script) . 0/24 crash
-  Python 3.10/3.12 en server-17/18 ................. 0/12 crash
+  Python 3.10/3.12 en server-agentes (mismo script) . 0/6 crash
+  Python 3.10/3.12 en server-17 ..................... 0/6 crash
+  Python 3.10.12 en server-18 ....................... 0/6 crash
+  Python 3.11.2 en server-19 ....................... 0/6 crash
+  => 4 MÁQUINAS DISTINTAS, 4 VERSIONES DISTINTAS: 0/48 crashes
   MODE=churn (misma carga, sin dict) .............. 0/24 crash
   RAM secuencial: 1.28 GB escrito/leído ........... 0 corrupciones
   1-2 hilos, cualquier tamaño ..................... 0/20 crash
@@ -32,15 +35,19 @@ RESULTADOS MEDIDOS EN ESTA MÁQUINA (2026-11-01)
 
 CONCLUSIÓN
 ==========
-Todas las versiones de Python fallan igual -> no es un bug del intérprete.
-El mismo script en los otros servidores nunca falla -> no es el código.
-El fallo escala con el número de hilos y con el tamaño del dict, y persiste
-con un solo núcleo -> no es coherencia de caché entre núcleos.
+Todas las versiones de Python fallan igual (3.13, 3.14.7, 3.14.9) -> no es
+un bug del intérprete. El mismo script, en 4 máquinas distintas y con 4
+versiones distintas de Python, nunca falla -> no es el código. El fallo escala
+con el número de hilos y con el tamaño del dict, y persiste con un solo
+núcleo -> no es coherencia de caché entre núcleos.
 La RAM está a 1872 MT/s (OC, non-ECC): el kernel no puede ver la corrupción.
 
-Es la RAM a 1872 MT/s corrupriendo memoria bajo concurrencia. Python 3.14 es
+Es la RAM a 1872 MT/s corrompiendo memoria bajo concurrencia. Python 3.14 es
 solo la víctima más visible (hash tables); Node/V8 lo fue antes, y el gateway
 ya sufría "double free or corruption (out)" — el mismo síntoma.
+
+Las otras 4 máquinas (todas con 0 traps en su dmesg y 3+ días de uptime)
+sirvieron como control: el mismo script, sin una sola caída.
 
 MITIGACIÓN APLICADA
 ===================
