@@ -178,6 +178,14 @@ then sits quiet for `ALERT_COOLDOWN_MIN` minutes (default 60).
    `https://api.telegram.org/bot<TOKEN>/getUpdates` and read the `chat.id`
    field. For supergroups it will be a negative number starting with
    `-100`; for private messages it will be a positive number.
+   - Current setup: bot `@agentyarvisbot` (also used by the Hermes
+     gateway), posting to the supergroup `Alertas servers y sistemas`
+     (`-1004388363640`). One bot, one place — alerts and agent
+     messages land in the same chat.
+   - The bot **must be a member of the group**. A correct chat id
+     with a non-member bot fails with `Bad Request: chat not found`,
+     and the alert is silently dropped (the notifier logs the error
+     and keeps polling).
 4. **Create `.env`** in the project root with those two values:
 
    ```bash
