@@ -153,19 +153,35 @@ cluster-dashboard/
 | `ALERT_ENABLED` | true | Set to `false` to disable Telegram alerts entirely |
 | `ALERT_TELEGRAM_BOT_TOKEN` | *(none)* | From `@BotFather`. Required for alerts |
 | `ALERT_TELEGRAM_CHAT_ID` | *(none)* | Numeric id of the group/channel the bot posts in |
-| `ALERT_DISK_THRESHOLD` | 65 | Filesystem usage % that fires an alert |
+| `ALERT_DISK_THRESHOLD` | 75 | Filesystem usage % that fires an alert |
 | `ALERT_COOLDOWN_MIN` | 60 | Don't re-alert for the same (server, mount) within this many minutes |
 
 ## Telegram alerts
 
 The dashboard can send alerts to a Telegram group or channel when:
 
-- a filesystem crosses `ALERT_DISK_THRESHOLD`% (default 65), or
+- a filesystem crosses `ALERT_DISK_THRESHOLD`% (default 75), or
 - a server that was responding stops responding (or vice-versa).
 
 Cooldown is per `(server, mount)` for disk alerts, and per `server` for
 reachability. A disk at 95% won't re-alert every 30s; it alerts once and
 then sits quiet for `ALERT_COOLDOWN_MIN` minutes (default 60).
+
+The disk alert reports the real total, the used volume and the free
+volume together:
+
+```
+💾 server-agentes disk alert
+host: ubuntu-vane
+mount: /
+used: 60% of 115.1 GB — 66.0 GB used, 45.2 GB free
+threshold: 75%
+```
+
+The threshold is a percentage, so it means different amounts of free
+space on different machines — 75% of a 115 GB disk still leaves 29 GB,
+while 75% of a 20 GB disk leaves 5 GB. Tune it per fleet if the machines
+are not similar.
 
 ### Setup (one time)
 

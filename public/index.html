@@ -260,7 +260,7 @@ function renderCard(alias, s, h) {
               <div class="disk">
                 <div style="display:flex;justify-content:space-between;">
                   <span class="name">${d.mount}</span>
-                  <span>${d.usedPct}% · ${d.totalGB} GB</span>
+                  <span>${d.usedPct}% · ${d.usedGB} / ${d.totalGB} GB · ${d.availGB} GB free</span>
                 </div>
                 <div class="bar ${colorFor(d.usedPct, 'disk')}"><i style="width:${Math.min(d.usedPct, 100)}%"></i></div>
               </div>

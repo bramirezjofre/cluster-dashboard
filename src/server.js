@@ -227,7 +227,13 @@ const REMOTE_SCRIPT = [
 '# The head -10 + sort -k2 is to keep the dashboard from being dominated',
 '# by tiny mounts; on a Raspberry Pi the root partition is the biggest',
 '# so it shows up first.',
-'df -PB1 -x tmpfs -x devtmpfs -x squashfs 2>/dev/null | awk \'$1 ~ /^\\/dev\\// {gsub("%","",$5); printf "disk=%s,%s,%s\\n", $6, $3, $5}\' | sort -t, -k2 -nr | head -5',
+'#',
+'# Output format: mount,sizeBytes,usedBytes,availBytes,usedPct',
+'#   $2 = Size, $3 = Used, $4 = Available, $5 = Capacity, $6 = Mounted on',
+'# -B1 sets the block size to 1 byte, so the counters are already bytes',
+'# and must NOT be scaled. All three are reported so the UI can show the',
+'# real total and the free space, not just a percentage (parseDiskLine).',
+'df -PB1 -x tmpfs -x devtmpfs -x squashfs 2>/dev/null | awk \'$1 ~ /^\\/dev\\// {gsub("%","",$5); printf "disk=%s,%s,%s,%s,%s\\n", $6, $2, $3, $4, $5}\' | sort -t, -k2 -nr | head -5',
 '',
 'NET=$(awk \'NR>2 && $1!~/:lo/ && $1!~/^Inter-/ {rx+=$2; tx+=$10} END {printf "%s %s", rx, tx}\' /proc/net/dev)',
 'printf \'net_rx=%s\\nnet_tx=%s\\n\' $(echo $NET | cut -d\' \' -f1) $(echo $NET | cut -d\' \' -f2)',
@@ -264,6 +270,37 @@ function parseScriptOutput(stdout) {
     }
   }
   return out
+}
+
+// Parse one "mount,sizeBytes,usedBytes,availBytes,usedPct" line emitted by
+// the df pipeline in REMOTE_SCRIPT.
+//
+// Why this exists: the old parser took only $3 of `df -PB1`, which is the
+// USED column, and then labelled it "totalGB". The disk alert therefore
+// read "65% of 70.4 GB" on a 115 GB disk — the number was the used space
+// presented as if it were the capacity, so the percentage and the volume
+// described different things.
+//
+// df's percentage column is Used/(Used+Available), not Used/Size — the
+// reserved-blocks difference makes them disagree. So we carry all three
+// byte counters and let the caller decide what to show.
+export function parseDiskLine(line) {
+  if (typeof line !== 'string') return null
+  const parts = line.split(',')
+  if (parts.length < 5) return null
+  const [mount, size, used, avail, usedPct] = parts
+  if (!mount) return null
+  const sizeB = +(size || 0)
+  const usedB = +(used || 0)
+  const availB = +(avail || 0)
+  if (!Number.isFinite(sizeB) || sizeB <= 0) return null
+  return {
+    mount,
+    totalGB: +(sizeB / 1024 / 1024 / 1024).toFixed(1),
+    usedGB: +(usedB / 1024 / 1024 / 1024).toFixed(1),
+    availGB: +(availB / 1024 / 1024 / 1024).toFixed(1),
+    usedPct: +(usedPct || 0),
+  }
 }
 
 // Read the identity file path from the ssh config for a given Host alias.
@@ -414,13 +451,11 @@ async function pollAll() {
       const load1 = +(r.load1 || 0)
       const net_rx = +(r.net_rx || 0)
       const net_tx = +(r.net_tx || 0)
-      // r.disk is an array of "mount,totalBytes,usedPct" strings (see
-      // parseScriptOutput). Empty when df returned no real mounts.
+      // r.disk is an array of "mount,sizeBytes,usedBytes,availBytes,usedPct"
+      // strings (see REMOTE_SCRIPT + parseDiskLine). Empty when df returned
+      // no real mounts.
       const diskLines = Array.isArray(r.disk) ? r.disk : (r.disk ? [r.disk] : [])
-      const disks = diskLines.map(line => {
-        const [mount, total, usedPct] = line.split(',')
-        return { mount, totalGB: +(+(total || 0) / 1024 / 1024 / 1024).toFixed(1), usedPct: +(usedPct || 0) }
-      })
+      const disks = diskLines.map(parseDiskLine).filter(Boolean)
       const sample = {
         ts: r.ts,
         cpu, memPct, memUsedMB: +(memUsed / 1024).toFixed(0), memTotalMB: +(memTotal / 1024).toFixed(0),

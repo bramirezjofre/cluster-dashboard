@@ -151,12 +151,22 @@ function escapeHtml(s) {
   return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
 }
 
-function diskAlertMsg(server, hostname, mount, usedPct, totalGB) {
+function diskAlertMsg(server, hostname, mount, usedPct, disk) {
+  // `disk` is the parsed disk object: { totalGB, usedGB, availGB, usedPct }.
+  // The old message read "used: 65% of 70.4 GB" because totalGB was
+  // actually the USED column of df (see parseDiskLine). Show all three
+  // numbers so the percentage and the volumes describe the same thing.
+  const total = disk?.totalGB
+  const used = disk?.usedGB
+  const avail = disk?.availGB
+  const volume = (Number.isFinite(total) && total > 0)
+    ? `of ${total} GB — ${used} GB used, ${avail} GB free`
+    : ''
   return [
     `💾 <b>${escapeHtml(server)}</b> disk alert`,
     `host: <code>${escapeHtml(hostname)}</code>`,
     `mount: <code>${escapeHtml(mount)}</code>`,
-    `used: <b>${usedPct}%</b> of ${totalGB} GB`,
+    `used: <b>${usedPct}%</b> ${volume}`.trim(),
     `threshold: ${DISK_THRESHOLD}%`,
   ].join('\n')
 }
@@ -283,7 +293,7 @@ export async function check(state) {
         if (d.usedPct >= DISK_THRESHOLD) {
           const key = `disk:${alias}:${d.mount}`
           if (!inCooldown(key)) {
-            fires.push({ key, text: diskAlertMsg(alias, srv.last.hostname, d.mount, d.usedPct, d.totalGB) })
+            fires.push({ key, text: diskAlertMsg(alias, srv.last.hostname, d.mount, d.usedPct, d) })
           }
         }
       }
