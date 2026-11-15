@@ -50,6 +50,7 @@ import { fileURLToPath } from 'node:url'
 import { Client } from 'ssh2'
 import { DatabaseSync } from 'node:sqlite'
 import { check as checkAlerts } from './notifier.js'
+import { fetchKumaStatus } from './kuma.js'
 
 // __dirname equivalent for ESM. fileURLToPath(import.meta.url) gives the
 // path of THIS file (.../cluster-dashboard/src/server.js). dirname() peels
@@ -94,6 +95,22 @@ const SERVERS = (process.env.CLUSTER_SERVERS || 'server-11,server-17,server-18,s
   .split(',')
   .map(s => s.trim())
   .filter(Boolean)
+
+// --- Uptime Kuma (service-level monitoring) --------------------------------
+//
+// Kuma probes the HTTP/TCP endpoints (GitLab, n8n, paper-trading, ...)
+// and exposes the verdict as Prometheus metrics. The dashboard reads
+// GET /metrics with the API key and renders it in a "Servicios" card.
+//
+// Kuma is a pure sensor here: it does the probing, the dashboard does
+// the alerting. Kuma's own Telegram notification is disabled so there is
+// exactly one alerting path and one bot token in the stack.
+//
+// Both values live in .env (gitignored), not in the compose file.
+const KUMA_URL = process.env.KUMA_URL || ''
+const KUMA_API_KEY = process.env.KUMA_API_KEY || ''
+const KUMA_ENABLED = !!(KUMA_URL && KUMA_API_KEY)
+const KUMA_TIMEOUT_MS = +(process.env.KUMA_TIMEOUT_MS || 8_000)
 
 
 // Long-term history lives in SQLite. Default path is inside the
@@ -422,6 +439,9 @@ const state = {
   history: {},
   lastPollAt: 0,
   pollErrors: 0,
+  // Service-level view from Uptime Kuma. `monitors` is empty when Kuma
+  // is not configured; `error` carries the reason when a scrape fails.
+  kuma: { ok: false, monitors: [], error: null, lastFetchAt: 0 },
 }
 
 for (const alias of SERVERS) {
@@ -497,6 +517,25 @@ async function pollAll() {
   state.pollErrors = SERVERS.length - okCount
   if (okCount > 0) console.log(`[poll] ${okCount}/${SERVERS.length} ok in ${Date.now() - t0}ms`)
   if (state.pollErrors > 0) console.warn(`[poll] ${state.pollErrors} server(s) failed`)
+  await pollKuma()
+}
+
+// Scrape Uptime Kuma's /metrics for the service-level view.
+//
+// Runs after the SSH poll, in the same cycle, so the "Servicios" card
+// and the server cards always describe the same moment. A failed scrape
+// leaves the previous monitor list in place and records the error: the
+// card shows "kuma unreachable" rather than a fleet of fake DOWNs.
+async function pollKuma() {
+  if (!KUMA_ENABLED) return
+  const r = await fetchKumaStatus({ url: KUMA_URL, apiKey: KUMA_API_KEY, timeoutMs: KUMA_TIMEOUT_MS })
+  state.kuma = {
+    ok: r.ok,
+    monitors: r.ok ? r.monitors : state.kuma.monitors,
+    error: r.error,
+    lastFetchAt: r.fetchedAt,
+  }
+  if (!r.ok) console.warn(`[kuma] scrape failed: ${r.error}`)
 }
 
 // After every successful poll, look for things that crossed a threshold
@@ -526,6 +565,16 @@ app.get('/api/cluster/status', (_req, res) => {
       ts: h.ts.samples, cpu: h.cpu.samples, mem: h.mem.samples,
       load1: h.load1.samples, net_rx: h.net_rx.samples, net_tx: h.net_tx.samples,
     }])),
+    // Service-level view from Uptime Kuma. `enabled` is false when the
+    // integration is not configured, so the UI can hide the card instead
+    // of rendering an empty one.
+    kuma: {
+      enabled: KUMA_ENABLED,
+      ok: state.kuma.ok,
+      error: state.kuma.error,
+      lastFetchAt: state.kuma.lastFetchAt,
+      monitors: state.kuma.monitors,
+    },
   })
 })
 app.get('/api/health', (_req, res) => res.json({ ok: true, uptime: process.uptime() }))

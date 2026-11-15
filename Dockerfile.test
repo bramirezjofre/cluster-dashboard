@@ -25,9 +25,12 @@ WORKDIR /app
 # so server.js has to be copied in too.
 COPY src/server.js                 ./src/server.js
 COPY src/notifier.js               ./src/notifier.js
+COPY src/kuma.js                   ./src/kuma.js
 COPY src/ssh-error-handling.test.js ./src/ssh-error-handling.test.js
 COPY src/lan-removal.test.js       ./src/lan-removal.test.js
 COPY src/disk-parse.test.js        ./src/disk-parse.test.js
+COPY src/kuma.test.js              ./src/kuma.test.js
+COPY src/kuma-notifier.test.js     ./src/kuma-notifier.test.js
 
 # Run all *.test.js files under src/. `node --test` discovers tests
 # when given a glob pattern. --test-reporter=spec gives readable output

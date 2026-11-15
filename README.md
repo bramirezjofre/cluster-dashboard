@@ -121,6 +121,15 @@ The test suite currently covers:
   `lan_enrich.js` / `iface_traffic.js` imports, no `child_process`, no
   LAN env vars or API endpoints, no OUI table, and no native addon
   (`node:sqlite` instead of `better-sqlite3`).
+- `src/disk-parse.test.js` — the disk-line parser: the reported total is
+  really the total, not the used column.
+- `src/kuma.test.js` — the Kuma `/metrics` parser: the millisecond
+  metric vs the seconds one, the 30d uptime window vs 1d/365d, and
+  labels containing braces, commas or quotes.
+- `src/kuma-notifier.test.js` — the service alert rules end to end
+  against a local Telegram stub: one alert per outage, no lone "back
+  up", no alert for a pending monitor, no alert when the scrape fails,
+  and no duplicate after a restart.
 
 Tests use `node --test`, no extra dependencies.
 
@@ -135,6 +144,7 @@ cluster-dashboard/
 ├── docs/crash-diagnosis.md  # why the LAN panel was removed (SIGSEGV)
 ├── src/server.js          # daemon: ssh poll loop + JSON API + static serve
 ├── src/notifier.js        # telegram alerts
+├── src/kuma.js            # uptime-kuma /metrics scraper + parser
 └── public/index.html      # frontend: cards + sparklines + auto-refresh
 ```
 
@@ -155,17 +165,63 @@ cluster-dashboard/
 | `ALERT_TELEGRAM_CHAT_ID` | *(none)* | Numeric id of the group/channel the bot posts in |
 | `ALERT_DISK_THRESHOLD` | 75 | Filesystem usage % that fires an alert |
 | `ALERT_COOLDOWN_MIN` | 60 | Don't re-alert for the same (server, mount) within this many minutes |
+| `KUMA_URL` | *(none)* | Uptime Kuma base URL. Empty disables the services card |
+| `KUMA_API_KEY` | *(none)* | Kuma API key. Empty disables the services card |
+| `KUMA_TIMEOUT_MS` | 8000 | Deadline for the `/metrics` scrape |
+
+## Service monitoring (Uptime Kuma)
+
+The dashboard renders two kinds of state:
+
+- **Servers** — CPU, memory, disk, load and network, polled over SSH.
+  The dashboard is the only thing that talks to the servers.
+- **Services** — availability of the web/TCP endpoints (GitLab, n8n,
+  paper-trading, ...), probed by **Uptime Kuma**.
+
+Kuma lives on `server-agentes` (`/mnt/data/proyectosDocker/kuma/`) and is
+used as a **pure sensor**: it probes and decides, the dashboard announces.
+Kuma's own Telegram notification is *unlinked* from the monitors, so
+there is exactly one alerting path and one bot token in the stack. If you
+want Kuma to alert on its own again, run `kuma-manage.sh link` on the
+server.
+
+The integration reads Kuma's Prometheus endpoint:
+
+```
+GET http://192.168.1.5:3002/metrics
+Authorization: Basic base64(":" + <api key>)
+```
+
+Two things about that endpoint are easy to get wrong, and both are
+covered by `src/kuma.test.js`:
+
+- The API key goes in the **password** field of Basic auth; the username
+  is empty. `curl -u ":$KEY" ...`.
+- Kuma exports **two** response-time metrics: `monitor_response_time` in
+  **milliseconds** and `monitor_response_time_seconds` in **seconds**.
+  Reading the wrong one is a factor-1000 bug.
+
+The API key is created in the Kuma UI (Settings → API Keys). Kuma stores
+only a **bcrypt hash** of it, so the plaintext cannot be recovered from
+the database — keep `.env` at `600` and back it up. The same key is
+stored on the server in `/mnt/data/proyectosDocker/kuma/.admin-credentials`.
+
+A failed scrape does **not** produce alerts: the card shows "kuma
+unreachable" and keeps the last known monitor list, so a network blip
+never looks like a fleet of dead services.
 
 ## Telegram alerts
 
 The dashboard can send alerts to a Telegram group or channel when:
 
 - a filesystem crosses `ALERT_DISK_THRESHOLD`% (default 75), or
-- a server that was responding stops responding (or vice-versa).
+- a server that was responding stops responding (or vice-versa), or
+- a service monitored by Uptime Kuma goes down (or comes back up).
 
-Cooldown is per `(server, mount)` for disk alerts, and per `server` for
-reachability. A disk at 95% won't re-alert every 30s; it alerts once and
-then sits quiet for `ALERT_COOLDOWN_MIN` minutes (default 60).
+Cooldown is per `(server, mount)` for disk alerts, per `server` for
+reachability, and per monitor for services. A disk at 95% won't re-alert
+every 30s; it alerts once and then sits quiet for `ALERT_COOLDOWN_MIN`
+minutes (default 60).
 
 The disk alert reports the real total, the used volume and the free
 volume together:
@@ -177,6 +233,20 @@ mount: /
 used: 60% of 115.1 GB — 66.0 GB used, 45.2 GB free
 threshold: 75%
 ```
+
+A service alert names the monitor and the exact target it probes:
+
+```
+🔴 GitLab UI is down
+target: http://192.168.1.26:8081/
+type: http
+last response: 379 ms
+source: uptime-kuma
+```
+
+A "back up" is only sent if a "down" was sent first for that monitor —
+a service that was already down when the dashboard started does not
+produce a lone "back online" with nothing before it.
 
 The threshold is a percentage, so it means different amounts of free
 space on different machines — 75% of a 115 GB disk still leaves 29 GB,

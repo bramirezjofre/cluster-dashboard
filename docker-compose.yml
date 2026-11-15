@@ -60,6 +60,18 @@ services:
       ALERT_TELEGRAM_CHAT_ID: ${ALERT_TELEGRAM_CHAT_ID}
       ALERT_DISK_THRESHOLD: "75"
       ALERT_COOLDOWN_MIN: "60"
+      # Uptime Kuma — service-level monitoring. The dashboard scrapes
+      # Kuma's /metrics endpoint and renders the result in the
+      # "Servicios" card; Kuma is a pure sensor and does NOT alert on
+      # its own (its Telegram notification is disabled), so the dashboard
+      # is the single alerting path for both servers and services.
+      #
+      # The URL and the API key live in .env (gitignored). The key is the
+      # plaintext form — Kuma only stores a bcrypt hash of it, so it
+      # cannot be recovered from the database if lost.
+      KUMA_URL: ${KUMA_URL}
+      KUMA_API_KEY: ${KUMA_API_KEY}
+      KUMA_TIMEOUT_MS: "8000"
     volumes:
       - /home/bramirezj/.ssh:/home/bramirezj/.ssh:ro
       # The .env file holds secrets (telegram bot token, chat id). Compose

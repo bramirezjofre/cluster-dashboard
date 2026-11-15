@@ -55,6 +55,41 @@
   .disks { margin-top: 10px; display: flex; flex-direction: column; gap: 6px; }
   .disk { font-size: 11px; font-family: var(--mono); color: var(--label-2); }
   .disk .name { color: var(--label-3); }
+
+  /* --- services card (Uptime Kuma) --------------------------------------- */
+  /* The card spans the full grid width because it is a list, not a
+     per-server tile. Each row is one Kuma monitor: a status dot, the
+     monitor name, the target it probes, the response time and the 30d
+     uptime. A DOWN monitor gets the bad border on the row and a red
+     dot — the same visual language as the server cards, so a glance
+     tells you whether the fleet or a service is the problem. */
+  .card.services { grid-column: 1 / -1; }
+  /* The services card is a read-only list — it has no data-action, so the
+     click handler ignores it. It must not LOOK clickable either. */
+  .card.services { cursor: default; }
+  .card.services:hover { border-color: var(--border); }
+  .svc-list { display: flex; flex-direction: column; gap: 2px; }
+  .svc-row { display: grid; grid-template-columns: 10px 1fr auto 76px 76px 84px;
+             gap: 10px; align-items: center; padding: 6px 8px;
+             border-radius: 8px; font-size: 12px; }
+  .svc-row:hover { background: var(--surface-2); }
+  .svc-row.down { background: color-mix(in srgb, var(--bad) 10%, transparent); }
+  .svc-row .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--acc); }
+  .svc-row.down .dot { background: var(--bad); }
+  .svc-row .svc-name { font-weight: 500; }
+  .svc-row.down .svc-name { color: var(--bad); }
+  .svc-row .svc-target { font-family: var(--mono); font-size: 11px; color: var(--label-3);
+                         overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .svc-row .svc-num { font-family: var(--mono); font-size: 11px; color: var(--label-2);
+                      text-align: right; }
+  .svc-row .svc-cert { font-family: var(--mono); font-size: 11px; text-align: right;
+                       color: var(--label-3); }
+  .svc-row .svc-cert.warn { color: var(--warn); }
+  .svc-row .svc-cert.bad { color: var(--bad); }
+  .svc-head { display: grid; grid-template-columns: 10px 1fr auto 76px 76px 84px;
+              gap: 10px; padding: 0 8px 6px; font-size: 10px; color: var(--label-3);
+              text-transform: uppercase; letter-spacing: .06em; }
+  .svc-head .svc-num, .svc-head .svc-cert { text-align: right; }
   .loading { color: var(--label-3); font-style: italic; }
 
   /* --- card clickability -------------------------------------------------- */
@@ -282,6 +317,74 @@ function renderCard(alias, s, h) {
   `
 }
 
+// Render the Uptime Kuma card: one row per monitored service.
+//
+// Returns '' when the integration is not configured, so the UI simply
+// has no services card rather than an empty one. Kuma owns the monitor
+// list — the dashboard only reads it.
+function renderServicesCard(kuma) {
+  if (!kuma || !kuma.enabled) return ''
+  const monitors = Array.isArray(kuma.monitors) ? kuma.monitors : []
+  const down = monitors.filter(m => m.status === 0).length
+  const up = monitors.filter(m => m.status === 1).length
+  const pending = monitors.length - up - down
+
+  // A scrape failure keeps the last known monitor list but must say so:
+  // otherwise the card shows stale "up" dots as if they were fresh.
+  const stale = !kuma.ok
+  const rows = monitors.map(m => {
+    const isDown = m.status === 0
+    const isPending = m.status !== 0 && m.status !== 1
+    const target = m.type === 'port' ? `${m.hostname}:${m.port}` : m.url
+    const rt = Number.isFinite(m.responseTimeMs) ? `${Math.round(m.responseTimeMs)} ms` : '—'
+    const up30 = Number.isFinite(m.uptimeRatio30d) ? `${(m.uptimeRatio30d * 100).toFixed(1)}%` : '—'
+    // Certificate expiry: warn under 30 days, flag under 15.
+    let cert = '<span class="svc-cert">—</span>'
+    if (Number.isFinite(m.certDays)) {
+      const cls = m.certDays <= 15 ? 'bad' : m.certDays <= 30 ? 'warn' : ''
+      cert = `<span class="svc-cert ${cls}">${m.certDays}d</span>`
+    } else if (m.certValid === false) {
+      cert = `<span class="svc-cert bad">invalid</span>`
+    }
+    return `
+      <div class="svc-row ${isDown ? 'down' : ''}">
+        <span class="dot" style="${isPending ? 'background:var(--label-3)' : ''}"></span>
+        <span class="svc-name">${escapeHtml(m.name)}</span>
+        <span class="svc-target">${escapeHtml(target || '—')}</span>
+        <span class="svc-num">${rt}</span>
+        <span class="svc-num">${up30}</span>
+        ${cert}
+      </div>
+    `
+  }).join('')
+
+  const summary = stale
+    ? `<span class="status bad">kuma unreachable</span>`
+    : `<span class="status ${down ? 'bad' : 'ok'}">${up}/${monitors.length} up</span>`
+
+  return `
+    <div class="card services ${down ? 'bad' : ''}">
+      <div class="head">
+        <div>
+          <div class="name">Servicios</div>
+          <div class="meta" style="font-size:11px;color:var(--label-3);font-family:var(--mono);margin-top:2px;">
+            uptime-kuma${pending ? ` · ${pending} pending` : ''}${stale ? ` · ${escapeHtml(kuma.error || 'error')}` : ''}
+          </div>
+        </div>
+        ${summary}
+      </div>
+      ${monitors.length ? `
+        <div class="svc-head">
+          <span></span><span>monitor</span><span>target</span>
+          <span class="svc-num">resp</span><span class="svc-num">up 30d</span>
+          <span class="svc-cert">cert</span>
+        </div>
+        <div class="svc-list">${rows}</div>
+      ` : `<div class="loading">no monitors configured</div>`}
+    </div>
+  `
+}
+
 // Long-term history fallback per alias, in case the in-memory ring buffer
 // is empty after a container restart (e.g. just after `docker restart`).
 // Filled lazily by fetchAllHistory() and merged with the live ring buffer at
@@ -345,7 +448,10 @@ async function tick() {
         load1: mergeOne(live.load1, hist && hist.load1),
       })
     })
-    CARDS.innerHTML = cards.join('') || '<div class="loading">no servers configured</div>'
+    // The services card goes first: it answers "is anything broken?" before
+    // the per-server tiles answer "where?".
+    const services = renderServicesCard(d.kuma)
+    CARDS.innerHTML = (services ? services : '') + (cards.join('') || '<div class="loading">no servers configured</div>')
   } catch (e) {
     elLast.textContent = 'fetch failed: ' + e.message
   }

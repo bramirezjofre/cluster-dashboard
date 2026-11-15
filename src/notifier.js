@@ -35,6 +35,10 @@ const __dirname = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const ALERT_ENABLED = (process.env.ALERT_ENABLED || 'true').toLowerCase() !== 'false'
 const BOT_TOKEN = process.env.ALERT_TELEGRAM_BOT_TOKEN || ''
 const CHAT_ID = process.env.ALERT_TELEGRAM_CHAT_ID || ''
+// Telegram's API base. Overridable so the notifier's alert behaviour
+// can be exercised end to end against a local stub instead of the real
+// API — the default is unchanged, and nothing in production sets this.
+const TELEGRAM_API_BASE = (process.env.ALERT_TELEGRAM_API_BASE || 'https://api.telegram.org').replace(/\/+$/, '')
 const DISK_THRESHOLD = +(process.env.ALERT_DISK_THRESHOLD || 85)
 const COOLDOWN_MIN = +(process.env.ALERT_COOLDOWN_MIN || 60)
 const STATE_FILE = process.env.ALERT_STATE_FILE || resolve(process.env.ALERT_DATA_DIR || '/data', 'alert-state.json')
@@ -90,6 +94,32 @@ try {
   }
 } catch (e) { lastDownSent = {} }
 
+// Per-service state for the Uptime Kuma monitors.
+//
+// Kuma is a pure sensor: it probes and decides, the dashboard alerts.
+// So the dashboard needs to remember, per monitor, the last status it
+// saw and whether it already announced the outage. Without the first,
+// a monitor that was already down when the dashboard started would
+// silently flip to "back online" with no "down" before it. Without the
+// second, the same outage would be announced on every poll.
+//
+//   svcState = {
+//     "3": { status: 1, downSent: 0 },   // up, no outage announced
+//     "6": { status: 0, downSent: 1788232000000 },  // down, already announced
+//   }
+//
+// Persisted alongside the server counters so a container restart does not
+// reset the picture and cause a duplicate alert.
+let svcState = {}
+try {
+  if (existsSync(STATE_FILE)) {
+    const saved = JSON.parse(readFileSync(STATE_FILE, 'utf8'))
+    if (saved && typeof saved.svcState === 'object' && saved.svcState) {
+      svcState = saved.svcState
+    }
+  }
+} catch (e) { svcState = {} }
+
 function bumpFails(alias, okNow) {
   if (okNow) {
     // Recovered — clear the counter. We do NOT delete the key; we reset
@@ -116,6 +146,7 @@ function persistCounters() {
     try { disk = JSON.parse(readFileSync(STATE_FILE, 'utf8')) } catch (e) { disk = {} }
     disk.failCounters = failCounters
     disk.lastDownSent = lastDownSent
+    disk.svcState = svcState
     writeFileSync(STATE_FILE, JSON.stringify(disk))
   } catch (e) { /* */ }
 }
@@ -182,11 +213,38 @@ function serverAlertMsg(server, hostname, kind) {
   ].join('\n')
 }
 
+// Alert for a service monitor that Kuma reported as down / back up.
+//
+// The monitor name and target come straight from Kuma, so the message
+// names the exact thing that broke — the whole point of Kuma was that
+// "GitLab was down for 4 days and nobody knew when".
+function serviceAlertMsg(monitor, kind) {
+  const head = kind === 'down'
+    ? `🔴 <b>${escapeHtml(monitor.name)}</b> is down`
+    : `🟢 <b>${escapeHtml(monitor.name)}</b> is back up`
+  const target = monitor.type === 'port'
+    ? `${monitor.hostname}:${monitor.port}`
+    : monitor.url
+  const lines = [
+    head,
+    `target: <code>${escapeHtml(target || '—')}</code>`,
+    `type: ${escapeHtml(monitor.type || 'unknown')}`,
+  ]
+  if (kind === 'down' && Number.isFinite(monitor.responseTimeMs)) {
+    lines.push(`last response: ${Math.round(monitor.responseTimeMs)} ms`)
+  }
+  if (kind === 'up' && Number.isFinite(monitor.uptimeRatio30d)) {
+    lines.push(`uptime 30d: ${(monitor.uptimeRatio30d * 100).toFixed(2)}%`)
+  }
+  lines.push('source: uptime-kuma')
+  return lines.join('\n')
+}
+
 // ----- transport -----
 
 async function sendTelegram(text) {
   if (!BOT_TOKEN || !CHAT_ID) return { skipped: 'no token or chat id' }
-  const url = `https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`
+  const url = `${TELEGRAM_API_BASE}/bot${BOT_TOKEN}/sendMessage`
   const body = new URLSearchParams({ chat_id: CHAT_ID, text, parse_mode: 'HTML', disable_web_page_preview: 'true' })
   const res = await fetch(url, { method: 'POST', body, signal: AbortSignal.timeout(8_000) })
   if (!res.ok) {
@@ -222,82 +280,138 @@ export async function check(state) {
     return { skipped: 'no config' }
   }
 
-  if (prev === null) {
-    prev = snapshot(state)
-    return { skipped: 'first poll, no diff' }
-  }
+  // The first poll has no previous snapshot to diff the SERVER state
+  // against, so the server diffing is skipped on it (a server that is
+  // merely unreachable at boot must not be announced twice).
+  //
+  // The SERVICE loop below is NOT skipped, and that asymmetry is
+  // deliberate. Kuma's verdict is authoritative and persistent, so a
+  // service that is down when the dashboard starts IS worth announcing
+  // — that is precisely the "GitLab was down for 4 days and nobody
+  // knew" case. The service state lives in svcState (persisted), not in
+  // the prev snapshot, so it needs no first-poll exemption.
+  const isFirstPoll = prev === null
 
   const fires = []
   const firesPendingDownMark = []   // aliases whose down alert fired — mark lastDownSent after send
   const firesPendingUpMark = []     // aliases whose up alert fired — clear lastDownSent after send
+  const firesPendingSvcMark = []    // monitor ids whose down alert fired
+  const firesPendingSvcUpMark = []  // monitor ids whose up alert fired
   const now = snapshot(state)
 
-  for (const [alias, srv] of Object.entries(state.servers)) {
-    const prevSrv = prev.servers[alias] || { ok: false, last: null, error: null }
+  if (!isFirstPoll) {
+    for (const [alias, srv] of Object.entries(state.servers)) {
+      const prevSrv = prev.servers[alias] || { ok: false, last: null, error: null }
 
-    // Reachability transitions.
-    //
-    // Down: only fire after CONSECUTIVE_FAILS_THRESHOLD consecutive
-    // failed polls. A single ssh timeout (network blip, server load
-    // spike, daemon busy) shouldn't generate a "server down" alert.
-    // When the down alert fires, we set lastDownSent[alias] so the
-    // matching "up" alert is allowed later.
-    //
-    // Up: fire ONLY if a down alert was actually sent for this alias
-    // since the last successful reachability. Otherwise a transient
-    // single-poll failure + recovery (or a restart that started while
-    // the server was reachable) would emit a confusing "back online"
-    // with no preceding "unreachable" message. Reset lastDownSent
-    // once the recovery alert is sent, so the next down cycle starts
-    // clean.
-    if (!srv.ok) {
-      const count = bumpFails(alias, false)
-      // Fire once the counter has reached the threshold and we haven't
-      // already alerted within the cooldown. The earlier condition
-      // (`count === THRESHOLD && prevSrv.ok === true`) was too strict:
-      // if the counter was clobbered or the threshold moment was missed
-      // (e.g. a race with the snapshot update), the down alert never
-      // fired even after many consecutive failed polls. Now any poll
-      // that has counter >= threshold and is not in cooldown fires it.
-      // The prevSrv.ok check is removed because inCooldown already
-      // prevents repeat alerts within 60 minutes.
-      if (count >= CONSECUTIVE_FAILS_THRESHOLD && !inCooldown(`server:${alias}:down`)) {
-        const fire = { key: `server:${alias}:down`, text: serverAlertMsg(alias, srv.last?.hostname || alias, 'down') }
-        fires.push(fire)
-        // Optimistically mark so that if Telegram send fails, we still
-        // remember the down happened (a missing "down" + a matching
-        // "up" is the lesser evil). We could roll this back if send
-        // fails, but that risks a duplicate "down" on retry. Mark-then-
-        // send matches the rest of the notifier's behavior.
-        firesPendingDownMark.push(alias)
-      }
-    } else {
-      bumpFails(alias, true)
-      if (prevSrv.ok === false) {
-        const key = `server:${alias}:up`
-        // Only fire if a down was previously sent for this alias.
-        // Otherwise this is a transient blip (single-poll fail) or a
-        // first-seen-after-restart reachable state — neither warrants
-        // a notification.
-        if (lastDownSent[alias] && !inCooldown(key)) {
-          const fire = { key, text: serverAlertMsg(alias, srv.last?.hostname || alias, 'up') }
+      // Reachability transitions.
+      //
+      // Down: only fire after CONSECUTIVE_FAILS_THRESHOLD consecutive
+      // failed polls. A single ssh timeout (network blip, server load
+      // spike, daemon busy) shouldn't generate a "server down" alert.
+      // When the down alert fires, we set lastDownSent[alias] so the
+      // matching "up" alert is allowed later.
+      //
+      // Up: fire ONLY if a down alert was actually sent for this alias
+      // since the last successful reachability. Otherwise a transient
+      // single-poll failure + recovery (or a restart that started while
+      // the server was reachable) would emit a confusing "back online"
+      // with no preceding "unreachable" message. Reset lastDownSent
+      // once the recovery alert is sent, so the next down cycle starts
+      // clean.
+      if (!srv.ok) {
+        const count = bumpFails(alias, false)
+        // Fire once the counter has reached the threshold and we haven't
+        // already alerted within the cooldown. The earlier condition
+        // (`count === THRESHOLD && prevSrv.ok === true`) was too strict:
+        // if the counter was clobbered or the threshold moment was missed
+        // (e.g. a race with the snapshot update), the down alert never
+        // fired even after many consecutive failed polls. Now any poll
+        // that has counter >= threshold and is not in cooldown fires it.
+        // The prevSrv.ok check is removed because inCooldown already
+        // prevents repeat alerts within 60 minutes.
+        if (count >= CONSECUTIVE_FAILS_THRESHOLD && !inCooldown(`server:${alias}:down`)) {
+          const fire = { key: `server:${alias}:down`, text: serverAlertMsg(alias, srv.last?.hostname || alias, 'down') }
           fires.push(fire)
-          firesPendingUpMark.push(alias)
+          // Optimistically mark so that if Telegram send fails, we still
+          // remember the down happened (a missing "down" + a matching
+          // "up" is the lesser evil). We could roll this back if send
+          // fails, but that risks a duplicate "down" on retry. Mark-then-
+          // send matches the rest of the notifier's behavior.
+          firesPendingDownMark.push(alias)
+        }
+      } else {
+        bumpFails(alias, true)
+        if (prevSrv.ok === false) {
+          const key = `server:${alias}:up`
+          // Only fire if a down was previously sent for this alias.
+          // Otherwise this is a transient blip (single-poll fail) or a
+          // first-seen-after-restart reachable state — neither warrants
+          // a notification.
+          if (lastDownSent[alias] && !inCooldown(key)) {
+            const fire = { key, text: serverAlertMsg(alias, srv.last?.hostname || alias, 'up') }
+            fires.push(fire)
+            firesPendingUpMark.push(alias)
+          }
         }
       }
-    }
 
-    // Disk thresholds — only if current poll has data
-    if (srv.ok && srv.last && Array.isArray(srv.last.disks)) {
-      for (const d of srv.last.disks) {
-        if (d.usedPct >= DISK_THRESHOLD) {
-          const key = `disk:${alias}:${d.mount}`
-          if (!inCooldown(key)) {
-            fires.push({ key, text: diskAlertMsg(alias, srv.last.hostname, d.mount, d.usedPct, d) })
+      // Disk thresholds — only if current poll has data
+      if (srv.ok && srv.last && Array.isArray(srv.last.disks)) {
+        for (const d of srv.last.disks) {
+          if (d.usedPct >= DISK_THRESHOLD) {
+            const key = `disk:${alias}:${d.mount}`
+            if (!inCooldown(key)) {
+              fires.push({ key, text: diskAlertMsg(alias, srv.last.hostname, d.mount, d.usedPct, d) })
+            }
           }
         }
       }
     }
+  }
+
+  // --- service monitors (Uptime Kuma) -------------------------------------
+  //
+  // Kuma decides what is up and what is down; the dashboard announces it.
+  // Two rules keep the chat clean:
+  //
+  //   1. A "down" is announced once per outage, not once per poll. The
+  //      per-monitor downSent timestamp records that we already said it.
+  //   2. A "back up" is only announced if we announced the "down" first.
+  //      A monitor that recovers without us ever seeing it down must not
+  //      produce a lone "back online" — there was nothing to come back
+  //      from.
+  //
+  // The cooldown is the backstop for a flapping monitor.
+  const kuma = state.kuma
+  if (kuma && kuma.enabled && kuma.ok && Array.isArray(kuma.monitors)) {
+    for (const m of kuma.monitors) {
+      // A monitor with no status yet (Kuma has never completed a probe)
+      // is not evidence of anything. Skip it.
+      if (m.status !== 0 && m.status !== 1) continue
+      const id = String(m.id)
+      const st = svcState[id] || { status: null, downSent: 0 }
+      const downKey = `service:${id}:down`
+      const upKey = `service:${id}:up`
+
+      if (m.status === 0) {
+        // Down. Announce only if we have not already announced this
+        // outage and we are not inside the cooldown.
+        if (!st.downSent && !inCooldown(downKey)) {
+          fires.push({ key: downKey, text: serviceAlertMsg(m, 'down') })
+          firesPendingSvcMark.push(id)
+        }
+      } else if (m.status === 1) {
+        // Up. Only announce the recovery if we had announced the outage.
+        if (st.downSent && !inCooldown(upKey)) {
+          fires.push({ key: upKey, text: serviceAlertMsg(m, 'up') })
+          firesPendingSvcUpMark.push(id)
+        }
+      }
+      // Remember the status we just saw so the next poll can diff against
+      // it. downSent is only updated after a successful send.
+      svcState[id] = { status: m.status, downSent: st.downSent }
+    }
+    persistCounters()
   }
 
   // Mark sent + dispatch in parallel. A failure in one send doesn't
@@ -310,12 +424,30 @@ export async function check(state) {
       // After a successful send, update lastDownSent bookkeeping:
       //   - down alert fired → mark this alias so its matching up can fire
       //   - up   alert fired → clear this alias so the next cycle starts clean
-      const firedAlias = fires[i].key.split(':')[1]
-      if (firesPendingDownMark.includes(firedAlias)) {
-        lastDownSent[firedAlias] = Date.now()
-        persistCounters()
-      } else if (firesPendingUpMark.includes(firedAlias)) {
-        clearDownSent(firedAlias)
+      //
+      // The key prefix says which namespace we are in — `server:<alias>`
+      // or `service:<monitorId>` — so a monitor id can never be mistaken
+      // for a server alias.
+      const isService = fires[i].key.startsWith('service:')
+      const firedScope = fires[i].key.split(':')[1]
+      if (!isService) {
+        if (firesPendingDownMark.includes(firedScope)) {
+          lastDownSent[firedScope] = Date.now()
+          persistCounters()
+        } else if (firesPendingUpMark.includes(firedScope)) {
+          clearDownSent(firedScope)
+        }
+      } else {
+        // Service monitors: mark the outage as announced so it is not
+        // announced again, and clear that mark on recovery so the next
+        // outage can be announced too.
+        if (firesPendingSvcMark.includes(firedScope)) {
+          if (svcState[firedScope]) svcState[firedScope].downSent = Date.now()
+          persistCounters()
+        } else if (firesPendingSvcUpMark.includes(firedScope)) {
+          if (svcState[firedScope]) svcState[firedScope].downSent = 0
+          persistCounters()
+        }
       }
     } else {
       console.error(`alert: failed ${fires[i].key}: ${r.reason?.message || r.reason}`)
