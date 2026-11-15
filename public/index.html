@@ -215,6 +215,9 @@ function sparkPath(values, w = 320, h = 38) {
 // tuned for a small server; adjust if you ever monitor a beefier box.
 function colorFor(pct, kind) {
   if (kind === 'cpu') return pct >= 85 ? 'bad' : pct >= 60 ? 'warn' : ''
+  // CPU temperature thresholds. 75C is where a desktop CPU starts
+  // throttling and 90C is the typical critical point.
+  if (kind === 'temp') return pct >= 90 ? 'bad' : pct >= 75 ? 'warn' : ''
   if (kind === 'mem') return pct >= 90 ? 'bad' : pct >= 75 ? 'warn' : ''
   if (kind === 'disk') return pct >= 85 ? 'bad' : pct >= 70 ? 'warn' : ''
   return ''
@@ -248,6 +251,9 @@ function renderCard(alias, s, h) {
     `</svg>`
   const cpuPct = ok ? last.cpu : 0
   const memPct = ok ? last.memPct : 0
+  // null when the host has no usable thermal sensor. 0 is a valid
+  // reading, so the absence is null and not 0.
+  const tempC = ok && last.tempC !== null && last.tempC !== undefined ? Number(last.tempC) : null
   const disks = (ok && last.disks) ? last.disks : []
   return `
     <div class="card ${ok ? '' : 'bad'}" data-action="containers" data-alias="${alias}">
@@ -268,6 +274,12 @@ function renderCard(alias, s, h) {
             <div class="v">${cpuPct.toFixed(1)}<small>%</small></div>
             <div class="bar ${colorFor(cpuPct, 'cpu')}"><i style="width:${Math.min(cpuPct, 100)}%"></i></div>
             ${sparkSvg(h.cpu)}
+          </div>
+          <div class="stat">
+            <div class="l">Temp CPU</div>
+            <div class="v">${tempC === null ? '—' : tempC.toFixed(0) + '<small>°C</small>'}</div>
+            <div class="bar ${colorFor(tempC === null ? 0 : tempC, 'temp')}"><i style="width:${tempC === null ? 0 : Math.min((tempC / 100) * 100, 100)}%"></i></div>
+            ${sparkSvg(h.temp)}
           </div>
           <div class="stat">
             <div class="l">Memory</div>
@@ -414,6 +426,7 @@ async function fetchAllHistory() {
             cpu: h.samples.map(s => s.cpu),
             mem: h.samples.map(s => s.mem_pct),
             load1: h.samples.map(s => s.load1),
+            temp: h.samples.map(s => s.temp_c),
           }
         }
       } catch (_) { /* fall back to ring buffer only */ }
@@ -446,6 +459,7 @@ async function tick() {
         cpu: mergeOne(live.cpu, hist && hist.cpu),
         mem: mergeOne(live.mem, hist && hist.mem),
         load1: mergeOne(live.load1, hist && hist.load1),
+        temp: mergeOne(live.temp, hist && hist.temp),
       })
     })
     // The services card goes first: it answers "is anything broken?" before

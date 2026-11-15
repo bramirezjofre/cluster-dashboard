@@ -31,6 +31,8 @@ COPY src/lan-removal.test.js       ./src/lan-removal.test.js
 COPY src/disk-parse.test.js        ./src/disk-parse.test.js
 COPY src/kuma.test.js              ./src/kuma.test.js
 COPY src/kuma-notifier.test.js     ./src/kuma-notifier.test.js
+COPY src/temp-parse.test.js        ./src/temp-parse.test.js
+COPY public/index.html             ./public/index.html
 
 # Run all *.test.js files under src/. `node --test` discovers tests
 # when given a glob pattern. --test-reporter=spec gives readable output

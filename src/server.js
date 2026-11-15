@@ -142,10 +142,21 @@ db.exec(`
   ) WITHOUT ROWID;
   CREATE INDEX IF NOT EXISTS idx_samples_alias_ts ON samples(alias, ts);
 `)
+// Migration: add the temperature column to an existing database.
+// CREATE TABLE IF NOT EXISTS above is a no-op when the table already
+// exists, so a schema change needs an explicit ALTER. Wrapped in a
+// try/catch because SQLite errors when the column is already there.
+try {
+  db.exec('ALTER TABLE samples ADD COLUMN temp_c REAL')
+} catch (e) {
+  // "duplicate column name" on an already-migrated database: expected.
+  if (!String(e.message).includes('duplicate column')) throw e
+}
+
 const insertSample = db.prepare(`
   INSERT OR REPLACE INTO samples
-    (alias, ts, cpu, mem_pct, mem_used_mb, mem_total_mb, load1, net_rx_kbps, net_tx_kbps, containers, hostname)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    (alias, ts, cpu, mem_pct, mem_used_mb, mem_total_mb, load1, net_rx_kbps, net_tx_kbps, containers, hostname, temp_c)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `)
 // Runs once on startup and then after every poll. Trims anything older
 // than HISTORY_DAYS so the file doesn't grow unbounded.
@@ -234,6 +245,61 @@ const REMOTE_SCRIPT = [
 'T2=$(awk \'/^cpu / {idle=$5; for(i=2;i<=NF;i++) t+=$i; print idle"/"t}\' /proc/stat)',
 'awk -F/ -v a="$T1" -v b="$T2" \'BEGIN{split(a,a2,"/"); split(b,b2,"/"); idle=b2[1]-a2[1]; tot=b2[2]-a2[2]; if(tot>0) printf "cpu=%.1f\\n", (1-idle/tot)*100; else printf "cpu=0\\n"}\' 2>/dev/null || echo "cpu=0"',
 '',
+'# CPU temperature.',
+'#',
+'# The source varies per machine, so try in order of reliability:',
+'#   1. thermal_zone with type=x86_pkg_temp  (best: CPU package on x86)',
+'#   2. hwmon whose device name is a CPU sensor (coretemp / k8temp /',
+'#      cpu_thermal) -> take the max of its core sensors',
+'#   3. any readable hwmon temp as a last resort',
+'#',
+'# Values are millidegrees; some drivers report a bogus 4294967296 (an',
+'# unsigned overflow) for unused channels, so anything outside',
+'# 0..200000 is discarded. `sensors` is NOT used on purpose: it is not',
+'# installed on most of these hosts, and reading /sys needs no package.',
+'#',
+'# Emits: temp_c=<degrees> temp_label=<source>',
+'TEMP_C=',
+'TEMP_LABEL=',
+'for _z in /sys/class/thermal/thermal_zone*/; do',
+'  if [ -r "$_z/temp" ] && [ "$(cat "$_z/type" 2>/dev/null)" = "x86_pkg_temp" ]; then',
+'    _v=$(cat "$_z/temp")',
+'    if [ "$_v" -ge 0 ] 2>/dev/null && [ "$_v" -le 200000 ]; then',
+'      TEMP_C=$((_v / 1000)); TEMP_LABEL=x86_pkg_temp; break',
+'    fi',
+'  fi',
+'done',
+'if [ -z "$TEMP_C" ]; then',
+'  for _d in /sys/class/hwmon/hwmon*/; do',
+'    case "$(cat "$_d/name" 2>/dev/null)" in',
+'      coretemp|k8temp|cpu_thermal)',
+'        _best=0',
+'        for _f in "$_d"temp*_input; do',
+'          [ -r "$_f" ] || continue',
+'          _v=$(cat "$_f")',
+'          if [ "$_v" -ge 0 ] 2>/dev/null && [ "$_v" -le 200000 ]; then',
+'            [ "$_v" -gt "$_best" ] && _best=$_v',
+'          fi',
+'        done',
+'        if [ "$_best" -gt 0 ]; then',
+'          TEMP_C=$((_best / 1000)); TEMP_LABEL=$(cat "$_d/name" 2>/dev/null); break',
+'        fi ;;',
+'    esac',
+'  done',
+'fi',
+'if [ -z "$TEMP_C" ]; then',
+'  _best=0',
+'  for _f in /sys/class/hwmon/hwmon*/temp*_input; do',
+'    [ -r "$_f" ] || continue',
+'    _v=$(cat "$_f")',
+'    if [ "$_v" -ge 0 ] 2>/dev/null && [ "$_v" -le 200000 ]; then',
+'      [ "$_v" -gt "$_best" ] && _best=$_v',
+'    fi',
+'  done',
+'  [ "$_best" -gt 0 ] && { TEMP_C=$((_best / 1000)); TEMP_LABEL=hwmon; }',
+'fi',
+'printf \'temp_c=%s\\ntemp_label=%s\\n\' "$TEMP_C" "$TEMP_LABEL"',
+
 'MT=$(awk \'/^MemTotal:/ {print $2}\' /proc/meminfo)',
 'MA=$(awk \'/^MemAvailable:/ {print $2}\' /proc/meminfo)',
 'MU=$((MT - MA))',
@@ -453,6 +519,7 @@ for (const alias of SERVERS) {
     load1: makeRing(HISTORY_SAMPLES),
     net_rx: makeRing(HISTORY_SAMPLES),
     net_tx: makeRing(HISTORY_SAMPLES),
+    temp: makeRing(HISTORY_SAMPLES),
   }
 }
 
@@ -471,6 +538,12 @@ async function pollAll() {
       const load1 = +(r.load1 || 0)
       const net_rx = +(r.net_rx || 0)
       const net_tx = +(r.net_tx || 0)
+      // CPU temperature in whole degrees. `null` when the host exposes no
+      // usable sensor (a VM, or a machine whose only sensor is a bogus
+      // overflow value). 0 is a legitimate reading, so the absence is
+      // signalled by null and not by a sentinel number.
+      const tempRaw = r.temp_c === undefined || r.temp_c === '' ? null : Number(r.temp_c)
+      const tempC = Number.isFinite(tempRaw) ? tempRaw : null
       // r.disk is an array of "mount,sizeBytes,usedBytes,availBytes,usedPct"
       // strings (see REMOTE_SCRIPT + parseDiskLine). Empty when df returned
       // no real mounts.
@@ -482,6 +555,7 @@ async function pollAll() {
         load1, uptime: +(r.uptime || 0), distro: r.distro || 'unknown', kernel: r.kernel || '',
         hostname: r.hostname || '', containers: +(r.containers || 0), disks,
         net_rx_kbps: 0, net_tx_kbps: 0,
+        tempC, tempLabel: r.temp_label || '',
       }
       state.servers[r.alias] = { last: sample, ok: true }
       ringPush(hist.ts, sample.ts)
@@ -490,6 +564,7 @@ async function pollAll() {
       ringPush(hist.load1, load1)
       ringPush(hist.net_rx, net_rx)
       ringPush(hist.net_tx, net_tx)
+      ringPush(hist.temp, tempC)
       // Persist to SQLite for long-term history (survives restarts).
       // Worst-case disk growth: 5 servers × 1 sample/30s × ~80 bytes/row
       // × 30 days = ~3.5 MB. Trimming at HISTORY_DAYS caps it.
@@ -497,7 +572,7 @@ async function pollAll() {
         r.alias, sample.ts,
         sample.cpu, sample.memPct, sample.memUsedMB, sample.memTotalMB,
         sample.load1, sample.net_rx_kbps, sample.net_tx_kbps,
-        sample.containers, sample.hostname
+        sample.containers, sample.hostname, sample.tempC
       )
       // Derive a per-sample kbps from the delta vs the previous sample, so the
       // dashboard shows throughput rather than a monotonically-growing counter.
@@ -564,6 +639,7 @@ app.get('/api/cluster/status', (_req, res) => {
     history: Object.fromEntries(Object.entries(state.history).map(([alias, h]) => [alias, {
       ts: h.ts.samples, cpu: h.cpu.samples, mem: h.mem.samples,
       load1: h.load1.samples, net_rx: h.net_rx.samples, net_tx: h.net_tx.samples,
+      temp: h.temp.samples,
     }])),
     // Service-level view from Uptime Kuma. `enabled` is false when the
     // integration is not configured, so the UI can hide the card instead
@@ -594,7 +670,7 @@ app.get('/api/cluster/history', (req, res) => {
   const limit = Math.max(1, Math.min(5000, +(req.query.limit || 5000)))
   const rows = db.prepare(`
     SELECT ts, cpu, mem_pct, mem_used_mb, mem_total_mb, load1,
-           net_rx_kbps, net_tx_kbps, containers, hostname
+           net_rx_kbps, net_tx_kbps, containers, hostname, temp_c
     FROM samples
     WHERE alias = ? AND ts BETWEEN ? AND ?
     ORDER BY ts ASC

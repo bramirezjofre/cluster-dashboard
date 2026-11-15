@@ -21,6 +21,40 @@ container itself.
   volume) so it survives container restarts. Uses Node's built-in
   `node:sqlite`, so the daemon loads **no native addon** at all
 
+## CPU temperature
+
+Each server card shows a **Temp CPU** stat with its own sparkline. The
+value comes from the same single SSH exec per poll that carries CPU,
+memory and disk — no extra roundtrip, no agent on the remote host.
+
+The source differs per machine, so the remote script tries them in
+order of reliability:
+
+| Server | Source | Reported as |
+|---|---|---|
+| server-11 (Raspberry Pi) | `hwmon` `cpu_thermal` | `cpu_thermal` |
+| server-17 | `thermal_zone` `x86_pkg_temp` | `x86_pkg_temp` |
+| server-18 | `thermal_zone` `x86_pkg_temp` | `x86_pkg_temp` |
+| server-19 (AMD) | `hwmon` `k8temp` | `k8temp` |
+| server-agentes | `hwmon` `coretemp` | `coretemp` |
+
+Two details worth knowing:
+
+- **`sensors` is not used on purpose.** It is only installed on 2 of the
+  5 hosts, and reading `/sys/class/...` needs no package, so the same
+  script works everywhere.
+- **Out-of-range readings are discarded.** Some drivers report
+  `4294918296` (an unsigned overflow, i.e. 4294 °C) for unused
+  channels. Anything outside `0..200000` millidegrees is dropped, so
+  that value never reaches the UI.
+
+A host with no usable sensor renders as `—`, not `0`: zero is a
+legitimate reading and a sentinel number would be a lie.
+
+Thresholds: **warn at 75 °C**, **bad at 90 °C**. These are separate
+from the CPU-percentage thresholds — reusing those would mis-colour the
+bar, since 75 is a bad CPU percentage but a merely warm CPU.
+
 ## What it does NOT do
 
 - It does not modify the remote servers — no install, no agent, no
