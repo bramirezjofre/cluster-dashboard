@@ -212,7 +212,7 @@ The dashboard renders two kinds of state:
 - **Services** — availability of the web/TCP endpoints (GitLab, n8n,
   paper-trading, ...), probed by **Uptime Kuma**.
 
-Kuma lives on `server-agentes` (`/mnt/data/proyectosDocker/kuma/`) and is
+Kuma lives on its own host (see the `uptime-kuma-stack` repo) and is
 used as a **pure sensor**: it probes and decides, the dashboard announces.
 Kuma's own Telegram notification is *unlinked* from the monitors, so
 there is exactly one alerting path and one bot token in the stack. If you
@@ -222,7 +222,7 @@ server.
 The integration reads Kuma's Prometheus endpoint:
 
 ```
-GET http://192.168.1.5:3002/metrics
+GET http://<kuma-host>:<port>/metrics
 Authorization: Basic base64(":" + <api key>)
 ```
 
@@ -238,7 +238,7 @@ covered by `src/kuma.test.js`:
 The API key is created in the Kuma UI (Settings → API Keys). Kuma stores
 only a **bcrypt hash** of it, so the plaintext cannot be recovered from
 the database — keep `.env` at `600` and back it up. The same key is
-stored on the server in `/mnt/data/proyectosDocker/kuma/.admin-credentials`.
+stored on the server in the stack's `.admin-credentials` file.
 
 A failed scrape does **not** produce alerts: the card shows "kuma
 unreachable" and keeps the last known monitor list, so a network blip
@@ -272,7 +272,7 @@ A service alert names the monitor and the exact target it probes:
 
 ```
 🔴 GitLab UI is down
-target: http://192.168.1.26:8081/
+target: http://<host>:<port>/
 type: http
 last response: 379 ms
 source: uptime-kuma

@@ -128,7 +128,7 @@ La serie de traps empieza con el enrich del OUI, no con el reboot del
 Dos containers del **mismo binario viejo** (`cluster-dashboard:latest`,
 antes del fix), corriendo a la vez:
 
-- `dash-control` — `LAN_SUBNET=192.168.1.0/24` (LAN activo)
+- `dash-control` — `LAN_SUBNET=<lan-subnet>` (LAN activo)
 - `dash-nolan` — `LAN_SUBNET=""` (LAN desactivado)
 
 y el container nuevo en producción (LAN eliminado, `node:sqlite`).

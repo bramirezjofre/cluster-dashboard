@@ -275,12 +275,12 @@ test('a port monitor names host:port as its target', async () => {
   await withStateFile(async (stateFile) => {
     const { sent } = await runNotifier([
       stateWith([monitor(3, 1)]),
-      stateWith([monitor(3, 0, { type: 'port', hostname: '192.168.1.26', port: '2224', url: '192.168.1.26' })]),
+      stateWith([monitor(3, 0, { type: 'port', hostname: '10.0.0.1', port: '2224', url: '10.0.0.1' })]),
     ], { stateFile })
 
     const downs = sent.filter(t => t.includes('is down'))
     assert.equal(downs.length, 1)
-    assert.ok(downs[0].includes('192.168.1.26:2224'), `target missing in: ${downs[0]}`)
+    assert.ok(downs[0].includes('10.0.0.1:2224'), `target missing in: ${downs[0]}`)
   })
 })
 

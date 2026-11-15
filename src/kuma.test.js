@@ -34,18 +34,18 @@ import { parseKumaMetrics, metricsUrl } from './kuma.js'
 const SAMPLE = `
 # HELP monitor_status Monitor status
 # TYPE monitor_status gauge
-monitor_status{monitor_id="1",monitor_name="GitLab UI",monitor_type="http",monitor_url="http://192.168.1.26:8081/",monitor_hostname="",monitor_port="null"} 1
-monitor_response_time{monitor_id="1",monitor_name="GitLab UI",monitor_type="http",monitor_url="http://192.168.1.26:8081/",monitor_hostname="",monitor_port="null"} 379
-monitor_response_time_seconds{monitor_id="1",monitor_name="GitLab UI",monitor_type="http",monitor_url="http://192.168.1.26:8081/",monitor_hostname="",monitor_port="null",window="1d"} 0.24427569444444444
-monitor_response_time_seconds{monitor_id="1",monitor_name="GitLab UI",monitor_type="http",monitor_url="http://192.168.1.26:8081/",monitor_hostname="",monitor_port="null",window="30d"} 0.26011576265016373
-monitor_uptime_ratio{monitor_id="1",monitor_name="GitLab UI",monitor_type="http",monitor_url="http://192.168.1.26:8081/",monitor_hostname="",monitor_port="null",window="1d"} 1
-monitor_uptime_ratio{monitor_id="1",monitor_name="GitLab UI",monitor_type="http",monitor_url="http://192.168.1.26:8081/",monitor_hostname="",monitor_port="null",window="30d"} 0.9985
-monitor_uptime_ratio{monitor_id="1",monitor_name="GitLab UI",monitor_type="http",monitor_url="http://192.168.1.26:8081/",monitor_hostname="",monitor_port="null",window="365d"} 0.9
-monitor_cert_days_remaining{monitor_id="1",monitor_name="GitLab UI",monitor_type="http",monitor_url="http://192.168.1.26:8081/",monitor_hostname="",monitor_port="null"} 51
-monitor_cert_is_valid{monitor_id="1",monitor_name="GitLab UI",monitor_type="http",monitor_url="http://192.168.1.26:8081/",monitor_hostname="",monitor_port="null"} 1
-monitor_status{monitor_id="2",monitor_name="GitLab SSH (git)",monitor_type="port",monitor_url="192.168.1.26",monitor_hostname="192.168.1.26",monitor_port="2224"} 0
-monitor_response_time{monitor_id="2",monitor_name="GitLab SSH (git)",monitor_type="port",monitor_url="192.168.1.26",monitor_hostname="192.168.1.26",monitor_port="2224"} 25
-monitor_uptime_ratio{monitor_id="2",monitor_name="GitLab SSH (git)",monitor_type="port",monitor_url="192.168.1.26",monitor_hostname="192.168.1.26",monitor_port="2224",window="30d"} 0.99
+monitor_status{monitor_id="1",monitor_name="Service A",monitor_type="http",monitor_url="http://10.0.0.1:8081/",monitor_hostname="",monitor_port="null"} 1
+monitor_response_time{monitor_id="1",monitor_name="Service A",monitor_type="http",monitor_url="http://10.0.0.1:8081/",monitor_hostname="",monitor_port="null"} 379
+monitor_response_time_seconds{monitor_id="1",monitor_name="Service A",monitor_type="http",monitor_url="http://10.0.0.1:8081/",monitor_hostname="",monitor_port="null",window="1d"} 0.24427569444444444
+monitor_response_time_seconds{monitor_id="1",monitor_name="Service A",monitor_type="http",monitor_url="http://10.0.0.1:8081/",monitor_hostname="",monitor_port="null",window="30d"} 0.26011576265016373
+monitor_uptime_ratio{monitor_id="1",monitor_name="Service A",monitor_type="http",monitor_url="http://10.0.0.1:8081/",monitor_hostname="",monitor_port="null",window="1d"} 1
+monitor_uptime_ratio{monitor_id="1",monitor_name="Service A",monitor_type="http",monitor_url="http://10.0.0.1:8081/",monitor_hostname="",monitor_port="null",window="30d"} 0.9985
+monitor_uptime_ratio{monitor_id="1",monitor_name="Service A",monitor_type="http",monitor_url="http://10.0.0.1:8081/",monitor_hostname="",monitor_port="null",window="365d"} 0.9
+monitor_cert_days_remaining{monitor_id="1",monitor_name="Service A",monitor_type="http",monitor_url="http://10.0.0.1:8081/",monitor_hostname="",monitor_port="null"} 51
+monitor_cert_is_valid{monitor_id="1",monitor_name="Service A",monitor_type="http",monitor_url="http://10.0.0.1:8081/",monitor_hostname="",monitor_port="null"} 1
+monitor_status{monitor_id="2",monitor_name="Service B",monitor_type="port",monitor_url="10.0.0.1",monitor_hostname="10.0.0.1",monitor_port="2224"} 0
+monitor_response_time{monitor_id="2",monitor_name="Service B",monitor_type="port",monitor_url="10.0.0.1",monitor_hostname="10.0.0.1",monitor_port="2224"} 25
+monitor_uptime_ratio{monitor_id="2",monitor_name="Service B",monitor_type="port",monitor_url="10.0.0.1",monitor_hostname="10.0.0.1",monitor_port="2224",window="30d"} 0.99
 `
 
 test('parseKumaMetrics: returns one entry per monitor', () => {
@@ -76,11 +76,11 @@ test('parseKumaMetrics: uptime ratio uses the 30d window, not 1d or 365d', () =>
 test('parseKumaMetrics: carries the monitor identity labels', () => {
   const [http, port] = parseKumaMetrics(SAMPLE)
   assert.equal(http.id, 1)
-  assert.equal(http.name, 'GitLab UI')
+  assert.equal(http.name, 'Service A')
   assert.equal(http.type, 'http')
-  assert.equal(http.url, 'http://192.168.1.26:8081/')
+  assert.equal(http.url, 'http://10.0.0.1:8081/')
   assert.equal(port.type, 'port')
-  assert.equal(port.hostname, '192.168.1.26')
+  assert.equal(port.hostname, '10.0.0.1')
   assert.equal(port.port, '2224')
 })
 
@@ -144,15 +144,15 @@ test('parseKumaMetrics: unrelated metrics are ignored', () => {
 })
 
 test('metricsUrl: appends /metrics to a base URL', () => {
-  assert.equal(metricsUrl('http://192.168.1.5:3002'), 'http://192.168.1.5:3002/metrics')
+  assert.equal(metricsUrl('http://10.0.0.2:3002'), 'http://10.0.0.2:3002/metrics')
 })
 
 test('metricsUrl: leaves an explicit /metrics URL alone', () => {
-  assert.equal(metricsUrl('http://192.168.1.5:3002/metrics'), 'http://192.168.1.5:3002/metrics')
+  assert.equal(metricsUrl('http://10.0.0.2:3002/metrics'), 'http://10.0.0.2:3002/metrics')
 })
 
 test('metricsUrl: tolerates a trailing slash', () => {
-  assert.equal(metricsUrl('http://192.168.1.5:3002/'), 'http://192.168.1.5:3002/metrics')
+  assert.equal(metricsUrl('http://10.0.0.2:3002/'), 'http://10.0.0.2:3002/metrics')
 })
 
 test('metricsUrl: an empty URL stays empty', () => {

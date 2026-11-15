@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Diagnóstico de corrupción de memoria en ubuntu-republic-gamer (192.168.1.4).
+"""Diagnóstico de corrupción de memoria en ubuntu-republic-gamer.
 
 CONTEXTO
 =========
