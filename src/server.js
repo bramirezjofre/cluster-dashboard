@@ -91,6 +91,9 @@ const SSH_CONNECT_TIMEOUT_MS = +(process.env.SSH_CONNECT_TIMEOUT_MS || 8_000)
 const SSH_CMD_TIMEOUT_MS = +(process.env.SSH_CMD_TIMEOUT_MS || 10_000)
 const SSH_USER = process.env.SSH_USER || 'bramirezj'
 const SSH_KEYS_DIR = process.env.SSH_KEYS_DIR || '/home/bramirezj/.ssh'
+// The container runs as the host user so the read-only bind mount of the
+// SSH keys is readable. Both are overridable from the environment; the
+// defaults match this deployment.
 const SERVERS = (process.env.CLUSTER_SERVERS || 'server-11,server-17,server-18,server-19')
   .split(',')
   .map(s => s.trim())

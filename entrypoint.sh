@@ -26,6 +26,7 @@ chown -R "${BUILD_UID}:${BUILD_GID}" /data || {
 
 # The .ssh dir may be read-only bind-mounted. We only chown
 # the home dir itself, never touch .ssh contents.
+# The container runs as the host user, whose home is bind-mounted.
 if [ -d /home/bramirezj ]; then
   chown "${BUILD_UID}:${BUILD_GID}" /home/bramirezj || true
 fi
