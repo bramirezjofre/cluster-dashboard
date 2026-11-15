@@ -347,7 +347,7 @@ The compose file binds to `127.0.0.1:9090` only. If you want to reach
 the dashboard from your phone or another network, two safe options:
 
 1. Bind to `0.0.0.0:9090` and put it behind Nginx Proxy Manager with
-   Basic Auth (or a passkey via openGym if you build that integration).
+   Basic Auth.
 2. SSH-tunnel it: `ssh -L 9090:127.0.0.1:9090 user@host` and open
    `http://127.0.0.1:9090` in your local browser.
 
@@ -369,4 +369,4 @@ for every server it sees.
 
 ## License
 
-AGPL-3.0-or-later, same as openGym.
+MIT — see [LICENSE](LICENSE).
