@@ -217,7 +217,7 @@ function serverAlertMsg(server, hostname, kind) {
 //
 // The monitor name and target come straight from Kuma, so the message
 // names the exact thing that broke — the whole point of Kuma was that
-// "GitLab was down for 4 days and nobody knew when".
+// "the service was down for 4 days and nobody knew when".
 function serviceAlertMsg(monitor, kind) {
   const head = kind === 'down'
     ? `🔴 <b>${escapeHtml(monitor.name)}</b> is down`
@@ -287,7 +287,7 @@ export async function check(state) {
   // The SERVICE loop below is NOT skipped, and that asymmetry is
   // deliberate. Kuma's verdict is authoritative and persistent, so a
   // service that is down when the dashboard starts IS worth announcing
-  // — that is precisely the "GitLab was down for 4 days and nobody
+  // — that is precisely the "it was down for 4 days and nobody
   // knew" case. The service state lives in svcState (persisted), not in
   // the prev snapshot, so it needs no first-poll exemption.
   const isFirstPoll = prev === null

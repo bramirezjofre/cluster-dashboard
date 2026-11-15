@@ -1,7 +1,7 @@
 // cluster-dashboard — Uptime Kuma integration (read side).
 //
 // Kuma is the service-level monitor: it probes the HTTP/TCP endpoints
-// (GitLab, n8n, paper-trading, ...) and exposes the verdict as
+// (the web endpoints you care about) and exposes the verdict as
 // Prometheus metrics at GET /metrics. This module scrapes that endpoint
 // and turns it into the shape the dashboard renders.
 //

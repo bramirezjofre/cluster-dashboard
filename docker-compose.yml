@@ -9,7 +9,7 @@ name: cluster-dashboard
 # Servers polled are controlled by CLUSTER_SERVERS (comma-separated ssh
 # aliases from ~/.ssh/config). The current set: server-11 (RPi), server-17
 # (SSD 224GB), server-18 (HDD 500GB), server-19 (HDD 160GB), and
-# server-agentes (Ubuntu 24, 8 cores, the only one with /mnt/data
+# server-agentes (Ubuntu 24, 8 cores, the one with the extra data volume
 # attached). To drop one, remove it from the env var and recreate the
 # container.
 #
@@ -48,7 +48,7 @@ services:
       SSH_CONNECT_TIMEOUT_MS: "8000"
       SSH_CMD_TIMEOUT_MS: "10000"
       SSH_USER: "bramirezj"
-      SSH_KEYS_DIR: "/home/bramirezj/.ssh"
+      SSH_KEYS_DIR: "${SSH_KEYS_DIR:-/home/bramirezj/.ssh}"
       CLUSTER_SERVERS: "server-11,server-17,server-18,server-19,server-agentes"
       # Telegram alerting. To disable, set ALERT_ENABLED=false. To enable,
       # fill in a bot token (from @BotFather) and a chat id (the numeric
@@ -73,7 +73,7 @@ services:
       KUMA_API_KEY: ${KUMA_API_KEY}
       KUMA_TIMEOUT_MS: "8000"
     volumes:
-      - /home/bramirezj/.ssh:/home/bramirezj/.ssh:ro
+      - ${SSH_KEYS_DIR:-/home/bramirezj/.ssh}:/home/bramirezj/.ssh:ro
       # The .env file holds secrets (telegram bot token, chat id). Compose
       # substitutes ${ALERT_*} from it. Not in the image, not in git.
       - ./.env:/app/.env:ro

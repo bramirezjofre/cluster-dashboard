@@ -192,7 +192,7 @@ cluster-dashboard/
 | `SSH_CONNECT_TIMEOUT_MS` | 8000 | TCP+handshake deadline |
 | `SSH_CMD_TIMEOUT_MS` | 10000 | Per-exec deadline (must be >= connect timeout) |
 | `SSH_USER` | bramirezj | Fallback user when `~/.ssh/config` doesn't set one |
-| `SSH_KEYS_DIR` | `/home/bramirezj/.ssh` | Where to read `config` + private keys |
+| `SSH_KEYS_DIR` | `/home/<user>/.ssh` | Where to read `config` + private keys |
 | `CLUSTER_SERVERS` | `server-11,server-17,server-18,server-19` | Comma-separated Host aliases |
 | `ALERT_ENABLED` | true | Set to `false` to disable Telegram alerts entirely |
 | `ALERT_TELEGRAM_BOT_TOKEN` | *(none)* | From `@BotFather`. Required for alerts |
@@ -209,8 +209,8 @@ The dashboard renders two kinds of state:
 
 - **Servers** — CPU, memory, disk, load and network, polled over SSH.
   The dashboard is the only thing that talks to the servers.
-- **Services** — availability of the web/TCP endpoints (GitLab, n8n,
-  paper-trading, ...), probed by **Uptime Kuma**.
+- **Services** — availability of the web/TCP endpoints, probed by
+  **Uptime Kuma**.
 
 Kuma lives on its own host (see the `uptime-kuma-stack` repo) and is
 used as a **pure sensor**: it probes and decides, the dashboard announces.
@@ -271,7 +271,7 @@ threshold: 75%
 A service alert names the monitor and the exact target it probes:
 
 ```
-🔴 GitLab UI is down
+🔴 Service A is down
 target: http://<host>:<port>/
 type: http
 last response: 379 ms
@@ -300,7 +300,7 @@ are not similar.
    `-100`; for private messages it will be a positive number.
    - Current setup: bot `@agentyarvisbot` (also used by the Hermes
      gateway), posting to the supergroup `Alertas servers y sistemas`
-     (`-1004388363640`). One bot, one place — alerts and agent
+     (`<chat-id>`). One bot, one place — alerts and agent
      messages land in the same chat.
    - The bot **must be a member of the group**. A correct chat id
      with a non-member bot fails with `Bad Request: chat not found`,

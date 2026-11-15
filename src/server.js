@@ -98,7 +98,7 @@ const SERVERS = (process.env.CLUSTER_SERVERS || 'server-11,server-17,server-18,s
 
 // --- Uptime Kuma (service-level monitoring) --------------------------------
 //
-// Kuma probes the HTTP/TCP endpoints (GitLab, n8n, paper-trading, ...)
+// Kuma probes the HTTP/TCP endpoints of the services you care about
 // and exposes the verdict as Prometheus metrics. The dashboard reads
 // GET /metrics with the API key and renders it in a "Servicios" card.
 //
