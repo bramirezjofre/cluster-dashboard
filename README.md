@@ -21,6 +21,14 @@ container itself.
   volume) so it survives container restarts. Uses Node's built-in
   `node:sqlite`, so the daemon loads **no native addon** at all
 
+## Runtime requirements
+
+The container image pins the node build to `26.8.1` on purpose. Newer
+node builds (v26.9+) abort with SIGSEGV on CPUs without AVX/AVX2, such
+as the Pentium E5300 this dashboard was built for. See
+[docs/node-build-cpu-compatibility.md](docs/node-build-cpu-compatibility.md)
+for the reproduction and the check to run before bumping the pin.
+
 ## CPU temperature
 
 Each server card shows a **Temp CPU** stat with its own sparkline. The

@@ -1,4 +1,27 @@
-# cluster-dashboard — node 26 on Debian slim (glibc).
+# cluster-dashboard — node 26.8.1 on Debian slim (glibc).
+#
+# The node minor version is PINNED, not floating. The host CPU is a
+# Pentium E5300 (Sandy Bridge, x86-64-v2 — no AVX/AVX2/BMI2), and the
+# node builds from 26.9 onward abort on it with
+#
+#   traps: node-MainThread general protection fault ip:... in libc.so.6
+#
+# at the exact same libc offset on every run, from require('express')
+# onward — i.e. during module load, before the daemon does any work.
+# The fault is a "general protection fault", which on x86 means the
+# instruction stream is not legal on this CPU, not a data race.
+#
+# Verified on this host, 8 runs each, same image, same glibc, same
+# workload:
+#   node v26.12.1 (in node:26-slim)  -> 8/8 SIGSEGV (exit 139)
+#   node v26.8.1  (same binary path)  -> 8/8 OK
+# The node binary from the host mounted into the container reproduces the
+# same split, which isolates the variable to the node BUILD, not to the
+# image, the libc, the app or the overclock.
+#
+# Do NOT bump this to node:26-slim or a newer tag without re-running the
+# check on the target CPU first — a floating tag silently reintroduces
+# the crash-loop.
 #
 # Why node 26 + glibc instead of node 22/24 on Alpine (musl):
 #
@@ -31,7 +54,7 @@
 #   DOCKER_BUILDKIT=1 docker build -t cluster-dashboard .
 # or use docker compose build (BuildKit is on by default in recent Docker).
 
-FROM node:26-slim
+FROM node:26.8.1-slim
 WORKDIR /app
 
 # gosu lets the entrypoint drop privileges from root to the non-root

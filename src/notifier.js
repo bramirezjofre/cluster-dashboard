@@ -270,11 +270,16 @@ async function sendTelegram(text) {
 
 let prev = null
 
+// Own flag for the one-time warning. It cannot live on ALERT_ENABLED:
+// that is a boolean primitive, and assigning a property to it throws
+// "Cannot create property '_warned' on boolean 'true'".
+let configWarned = false
+
 export async function check(state) {
   if (!ALERT_ENABLED) return { skipped: 'disabled' }
   if (!BOT_TOKEN || !CHAT_ID) {
-    if (!ALERT_ENABLED._warned) {
-      ALERT_ENABLED._warned = true
+    if (!configWarned) {
+      configWarned = true
       console.warn('alert: ALERT_TELEGRAM_BOT_TOKEN or ALERT_TELEGRAM_CHAT_ID not set; alerts disabled')
     }
     return { skipped: 'no config' }
